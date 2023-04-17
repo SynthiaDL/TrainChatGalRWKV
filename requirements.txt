@@ -1,0 +1,4 @@
+git+https://github.com/EleutherAI/lm_dataformat.git
+ftfy>=6.0.1
+deepspeed
+transformers>=4.24.0
