@@ -1,7 +1,7 @@
 ########################################################################################################
 # The RWKV Language Model - https://github.com/BlinkDL/RWKV-LM
 ########################################################################################################
-
+import pdb
 if __name__ == "__main__":
     from argparse import ArgumentParser
     from pytorch_lightning import Trainer
@@ -63,6 +63,8 @@ if __name__ == "__main__":
     parser.add_argument("--epoch_count", default=500, type=int)  # train for this many "epochs". will continue afterwards with lr = lr_final
     parser.add_argument("--epoch_begin", default=0, type=int)  # if you load a model trained for x "epochs", set epoch_begin = x
     parser.add_argument("--epoch_save", default=5, type=int)  # save the model every [epoch_save] "epochs"
+    parser.add_argument("--previous_step", default=None, type=int)  # previous step，可能会影响learning rate的判断
+    parser.add_argument("--log_add_step", default=0, type=int)  # 单纯平移曲线
 
     parser.add_argument("--micro_bsz", default=12, type=int)  # micro batch size (batch size per GPU)
     parser.add_argument("--n_layer", default=6, type=int)
@@ -76,13 +78,12 @@ if __name__ == "__main__":
 
     parser.add_argument("--lr_init", default=6e-4, type=float)  # 6e-4 for L12-D768, 4e-4 for L24-D1024, 3e-4 for L24-D2048
     parser.add_argument("--lr_final", default=1e-5, type=float)
-    parser.add_argument("--warmup_steps", default=-1, type=int)  # try 50 if you load a model
+    parser.add_argument("--warmup_steps", default=0, type=int)  # try 50 if you load a model
     parser.add_argument("--beta1", default=0.9, type=float)
     parser.add_argument("--beta2", default=0.99, type=float)  # use 0.999 when your model is close to convergence
     parser.add_argument("--adam_eps", default=1e-8, type=float)
-    parser.add_argument("--grad_cp", default=0, type=int)  # gradient checkpt: saves VRAM, but slower
 
-    parser.add_argument("--my_pile_version", default=1, type=int)  # my special pile version
+    parser.add_argument("--grad_cp", default=0, type=int)  # gradient checkpt: saves VRAM, but slower
     parser.add_argument("--my_pile_stage", default=0, type=int)  # my special pile mode
     parser.add_argument("--my_pile_shift", default=-1, type=int)  # my special pile mode - text shift
     parser.add_argument("--my_pile_edecay", default=0, type=int)
@@ -105,20 +106,42 @@ if __name__ == "__main__":
     parser.add_argument("--load_partial", default=0, type=int)
     parser.add_argument("--magic_prime", default=0, type=int)
     parser.add_argument("--my_qa_mask", default=0, type=int)
-    parser.add_argument("--my_random_steps", default=0, type=int)
     parser.add_argument("--my_testing", default='', type=str)
+
+    parser.add_argument("--lora", action="store_true")
+    parser.add_argument("--lora_load", default="", type=str)
+    parser.add_argument("--lora_r", default=8, type=int)
+    parser.add_argument("--lora_alpha", default=32, type=float)
+    parser.add_argument("--lora_dropout", default=0.01, type=float)
+    parser.add_argument("--lora_parts", default="att,ln,time", type=str)
+    parser.add_argument("--lora_layers", default=None, type=str, help="仅训练部分层，Example: '0-3 25-31'")
+    parser.add_argument("--my_script_align", default=0, type=int)
+    parser.add_argument("--my_script_mask", default=None, type=str)
+    parser.add_argument("--accumulate_grad_batches_dict", default=None, type=str)
+
     parser.add_argument("--debug",action="store_true",default=False)
+
     parser = Trainer.add_argparse_args(parser)
     args = parser.parse_args()
 
+
+    if args.my_script_mask:
+        cut_extra, mask_prefix_lines = args.my_script_mask.split("_")
+        cut_extra = cut_extra == '1'
+        mask_prefix_lines = int(mask_prefix_lines)
+        args.my_script_mask = {
+            "cut_extra":cut_extra,
+            "mask_prefix_lines":mask_prefix_lines
+        }
     ########################################################################################################
 
     import os, warnings, math, datetime, sys, time, importlib
     import numpy as np
     import torch
     from torch.utils.data import DataLoader
-    if "deepspeed" in args.strategy:
-        import deepspeed
+    strategy = args.strategy or ""
+    # if "deepspeed" in strategy:
+    import deepspeed
     import pytorch_lightning as pl
     from pytorch_lightning import seed_everything
 
@@ -130,7 +153,8 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore", ".*Consider increasing the value of the `num_workers` argument*")
     warnings.filterwarnings("ignore", ".*The progress bar already tracks a metric with the*")
     # os.environ["WDS_SHOW_SEED"] = "1"
-
+    if args.previous_step is None:
+        args.previous_step = args.epoch_begin * args.epoch_steps
     args.my_timestamp = datetime.datetime.today().strftime("%Y-%m-%d-%H-%M-%S")
     args.enable_checkpointing = False
     args.replace_sampler_ddp = False
@@ -159,38 +183,22 @@ if __name__ == "__main__":
 
     if args.my_pile_stage > 0:
         magic_prime_bak = args.magic_prime
-
-        if args.my_pile_version == 1:
-            if args.ctx_len == 1024:
-                args.magic_prime = 324331313
-                args.epoch_count = 8043
-            elif args.ctx_len == 2048:
-                args.magic_prime = 162165671
-                args.epoch_count = 4021
-            elif args.ctx_len == 4096:
-                args.magic_prime = 81082817
-                args.epoch_count = 2010
-            elif args.ctx_len == 8192:
-                args.magic_prime = 40541399
-                args.epoch_count = 1005
-        else:
-            if args.ctx_len == 1024:
-                args.magic_prime = 1670239709
-                args.epoch_count = 41423
-            elif args.ctx_len == 2048:
-                args.magic_prime = 835119767
-                args.epoch_count = 20711
-            elif args.ctx_len == 4096:
-                args.magic_prime = 417559889
-                args.epoch_count = 10355
-            elif args.ctx_len == 6144:
-                args.magic_prime = 278373239
-                args.epoch_count = 6903
-            elif args.ctx_len == 8192:
-                args.magic_prime = 208779911
-                args.epoch_count = 5177
+        if args.ctx_len == 1024:
+            args.magic_prime = 324331313
+            args.epoch_count = 8043
+        elif args.ctx_len == 2048:
+            args.magic_prime = 162165671
+            args.epoch_count = 4021
+        elif args.ctx_len == 4096:
+            args.magic_prime = 81082817
+            args.epoch_count = 2010
         if args.my_pile_shift < 0:
-            args.my_pile_shift = 0
+            if args.ctx_len == 1024:
+                args.my_pile_shift = 0
+            elif args.ctx_len == 2048:
+                args.my_pile_shift = 512
+            elif args.ctx_len == 4096:
+                args.my_pile_shift = 768
 
         if magic_prime_bak > 0:
             args.magic_prime = magic_prime_bak
@@ -217,11 +225,10 @@ if __name__ == "__main__":
                 args.load_model = f"{args.proj_dir}/rwkv-init.pth"
             else:
                 args.load_model = f"{args.proj_dir}/rwkv-{max_p}.pth"
-                if args.warmup_steps < 0:
-                    if args.my_pile_stage == 2:
-                        args.warmup_steps = 10
-                    else:
-                        args.warmup_steps = 30
+                if args.my_pile_stage == 2:
+                    args.warmup_steps = 10
+                else:
+                    args.warmup_steps = 30
             args.epoch_begin = max_p + 1
 
     samples_per_epoch = args.epoch_steps * args.real_bsz
@@ -239,6 +246,7 @@ if __name__ == "__main__":
 # Each "epoch" = {args.epoch_steps} steps, {samples_per_epoch} samples, {tokens_per_epoch} tokens
 #
 # Model = {args.n_layer} n_layer, {args.n_embd} n_embd, {args.ctx_len} ctx_len
+# LoRA = {f'enabled, {args.lora_r} r, {args.lora_alpha} alpha, {args.lora_dropout} dropout, on {args.lora_parts}' if args.lora else 'disabled'}
 #
 # Adam = lr {args.lr_init} to {args.lr_final}, warmup {args.warmup_steps} steps, beta {args.betas}, eps {args.adam_eps}
 #
@@ -265,9 +273,10 @@ if __name__ == "__main__":
         rank_zero_info("\n\nNote: you are using fp16 (might overflow). Try bf16 / tf32 for stable training.\n\n")
 
     os.environ["RWKV_JIT_ON"] = "1"
-    if "deepspeed_stage_3" in args.strategy:
+    if "deepspeed_stage_3" in strategy:
         os.environ["RWKV_JIT_ON"] = "0"
-    if args.grad_cp == 1 or args.precision=='bf16':
+    if args.lora and args.grad_cp == 1:
+        print('!!!!! LoRA Warning: Gradient Checkpointing requires JIT off, disabling it')
         os.environ["RWKV_JIT_ON"] = "0"
 
     torch.backends.cudnn.benchmark = True
@@ -296,10 +305,53 @@ if __name__ == "__main__":
 
     if args.data_type == 'wds_img':
         from src.model_img import RWKV_IMG
+        assert args.lora, "LoRA not yet supported for RWKV_IMG"
         model = RWKV_IMG(args)
     else:
-        from src.model import RWKV
+        from src.model import RWKV, LORA_CONFIG, LoraLinear
+        if args.lora:
+            assert args.lora_r > 0, "LoRA should have its `r` > 0"
+            LORA_CONFIG["r"] = args.lora_r
+            LORA_CONFIG["alpha"] = args.lora_alpha
+            LORA_CONFIG["dropout"] = args.lora_dropout
+            LORA_CONFIG["parts"] = set(str(args.lora_parts).split(','))
+            LORA_CONFIG["layers"] = None
+            if args.lora_layers:
+                layers = []
+                for layer in args.lora_layers.split(' '):
+                    if layer.isdecimal():
+                        layers.append(int(layer))
+                    elif '-' in layer:
+                        start,_,end = layer.partition('-')
+                        start,end = int(start),int(end)
+                        layers.extend(range(start,end+1))
+                    else:
+                        raise NotImplementedError("layer_filter Not implemented:",args.layer_filter)
+                layers = sorted(set(layers))
+                LORA_CONFIG["layers"] = layers
+            enable_time_finetune = 'time' in LORA_CONFIG["parts"]
+            enable_ln_finetune = 'ln' in LORA_CONFIG["parts"]
         model = RWKV(args)
+        # only train lora parameters
+        if args.lora:
+            model.requires_grad_(False)
+            for name, module in model.named_modules():
+                if LORA_CONFIG["layers"] and name.startswith("block.") and int(name.split('.')[1]) not in LORA_CONFIG["layers"]:
+                    continue #不在指定layers里的层跳过，不训练（也没有对应的lora参数）
+                # have to check param name since it may have been wrapped by torchscript
+                if any(n.startswith("lora_") for n, _ in module.named_parameters()):
+                    print(f'  LoRA training module {name}')
+                    for pname, param in module.named_parameters():
+                        param.requires_grad = 'lora_' in pname
+                elif enable_ln_finetune and '.ln' in name: #注意，ln_out按这种过滤方式不会包含在内！
+                    print(f'  LoRA additionally training module {name}')
+                    for param in module.parameters():
+                        param.requires_grad = True
+                elif enable_time_finetune and any(n.startswith("time") for n, _ in module.named_parameters()):
+                    for pname, param in module.named_parameters():
+                        if pname.startswith("time"):
+                            print(f'  LoRA additionally training parameter {pname}')
+                            param.requires_grad = True
 
     if len(args.load_model) == 0 or args.my_pile_stage == 1:  # shall we build the initial weights?
         init_weight_name = f"{args.proj_dir}/rwkv-init.pth"
@@ -326,17 +378,30 @@ if __name__ == "__main__":
         for k in model.state_dict():
             if k not in load_keys:
                 load_dict[k] = model.state_dict()[k]
-    model.load_state_dict(load_dict)
-
+    # If using LoRA, the LoRA keys might be missing in the original model
+    model.load_state_dict(load_dict, strict=(not args.lora))
+    if os.path.isfile(args.lora_load):
+        model.load_state_dict(torch.load(args.lora_load, map_location="cpu"),
+                              strict=False)
+    if args.accelerator=="gpu" and args.precision == 'bf16': #WARNING: 可能不适合模型并行
+        model.to(device="cuda",dtype=torch.bfloat16)
+    if args.accumulate_grad_batches_dict:
+        import ast
+        args.accumulate_grad_batches = ast.literal_eval(args.accumulate_grad_batches_dict)
+    # if args.accelerator=="gpu" and args.strategy == "single_device":
+    #     from pytorch_lightning.strategies.single_device import SingleDeviceStrategy
+    #     args.strategy = SingleDeviceStrategy(device=)
     if args.debug:
         # args.overfit_batches=0.01
         # args.track_grad_norm=2
         args.detect_anomaly=True
-
+        print("enabling debug")
     trainer = Trainer.from_argparse_args(
         args,
         callbacks=[train_callback(args)],
     )
+    if args.accelerator=="gpu" and args.strategy == "single_device":
+        trainer.strategy._root_device = torch.device(0)
 
     if trainer.global_rank == 0:
         for n in model.state_dict():
@@ -347,12 +412,26 @@ if __name__ == "__main__":
             else:
                 print(f"{str(shape[0]).ljust(5)}       {n}")
 
-    if "deepspeed" in args.strategy:
+    if "deepspeed" in strategy:
         trainer.strategy.config["zero_optimization"]["allgather_bucket_size"] = args.ds_bucket_mb * 1000 * 1000
         trainer.strategy.config["zero_optimization"]["reduce_bucket_size"] = args.ds_bucket_mb * 1000 * 1000
 
     # must set shuffle=False, persistent_workers=False (because worker is in another thread)
     data_loader = DataLoader(train_data, shuffle=False, pin_memory=True, batch_size=args.micro_bsz, num_workers=1, persistent_workers=False, drop_last=True)
+    #debug
+    if args.debug:
+        from transformers import PreTrainedTokenizerFast
+        tokenizer = PreTrainedTokenizerFast(tokenizer_file='20B_tokenizer.json')
+        train_data.global_rank = 0
+        train_data.real_epoch = 0
+        train_data.world_size = 1
+        batch = next(iter(data_loader))
+        print(batch)
+        print(tokenizer.batch_decode(batch[0]))
+        pdb.set_trace()
+       
+    
+    #handle end
     import atexit
     def leave_script(env):
         # print(dir(),globals())
@@ -365,6 +444,16 @@ if __name__ == "__main__":
         else:
             to_save_dict = model.state_dict()
 
+        if args.lora:
+            enable_time_finetune = 'time' in LORA_CONFIG["parts"]
+            enable_ln_finetune = 'ln' in LORA_CONFIG["parts"]
+            lora_dict = {}
+            for name, state in to_save_dict.items():
+                if ('.lora_' in name
+                        or (enable_time_finetune and '.time_' in name)
+                        or (enable_ln_finetune and '.ln' in name)):
+                    lora_dict[name] = state
+            to_save_dict = lora_dict
         try:
             my_save(
                 to_save_dict,
@@ -373,4 +462,6 @@ if __name__ == "__main__":
         except Exception as e:
             print('Error\n\n', e, '\n\n')
     atexit.register(leave_script,args)
+
+
     trainer.fit(model, data_loader)

@@ -1,1 +1,1 @@
-python preprocess_data.py --input datasource/ChatGalDataset/train_dataset.jsonl --output-prefix ./data/chatgal3b --vocab .rwkv/20B_tokenizer.json --dataset-impl mmap --tokenizer-type HFTokenizer --append-eod
+python preprocess_data.py --input datasource/ChatGalDataset/train_dataset.jsonl --output-prefix ./data/chatgal --vocab pretrained_models/rwkv-4-novel/20B_tokenizer.json --dataset-impl mmap --tokenizer-type HFTokenizer --append-eod

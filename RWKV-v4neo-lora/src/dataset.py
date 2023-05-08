@@ -20,30 +20,27 @@ class MyDataset(Dataset):
             self.vocab_size = args.vocab_size
             rank_zero_info(f"Current vocab size = {self.vocab_size} (make sure it's correct)")
 
-            if args.my_pile_version == 1:
-                self.data = MMapIndexedDataset(args.data_file)
-                self.data_size = len(self.data._bin_buffer) // self.data._index._dtype_size
-                rank_zero_info(f"Data has {self.data_size} tokens.")
+            if args.data_file.endswith('/'):
+                d_all = []
+                for p in os.listdir(args.data_file):
+                    if p.endswith(".idx"):
+                        d_all += [p[:-4]]
+                d_all.sort()
+                rank_zero_info(d_all)
+                exit(0)
             else:
-                data_list = open(args.data_file, "r", encoding='utf-8').read().strip().split('\n')
-                data_list = [i.strip().split(' ') for i in data_list]
-                self.data = []
-                self.data_size = int(data_list[-1][-1])
-                rank_zero_info(f"Data has {self.data_size} chunks.")
-                for d in data_list:
-                    data = MMapIndexedDataset(d[0])
-                    data_size = len(data._bin_buffer) // data._index._dtype_size
-                    assert (data_size - args.ctx_len) == int(d[1])
-                    self.data += [[int(d[-1]), int(d[1]), data]]
-                # rank_zero_info(self.data)
+                self.data = MMapIndexedDataset(args.data_file)
+                self.data_size = len(self.data._bin_buffer) // 2
+                rank_zero_info(f"Data has {self.data_size} tokens.")
+
+            # if args.extra_data_file:
+            #     self.extra_data = MMapIndexedDataset(args.extra_dialog_data_file)
+            #     self.extra_data_size = len(self.extra_data._bin_buffer) // 2
+            #     rank_zero_info(f"Extra Data has {self.data_size} tokens.")
 
             if args.my_qa_mask > 0:
-                # self.data_pile = MMapIndexedDataset('/fsx/pile/pile_20B_tokenizer_text_document')
-                self.data_pile = MMapIndexedDataset('/fsx/pile_deduped/pile_0.87_deduped_text_document')
-                self.data_pile_size = len(self.data_pile._bin_buffer) // self.data._index._dtype_size
-            else:
-                self.data_pile = None
-                self.data_pile_size = 0
+                self.data_pile = MMapIndexedDataset('/fsx/BlinkDL/pile/pile_20B_tokenizer_text_document')
+                self.data_pile_size = len(self.data_pile._bin_buffer) // 2
 
             if args.my_pile_stage > 0:
                 # assert self.data_size == 332115325534 and self.vocab_size == 50277
@@ -110,6 +107,12 @@ class MyDataset(Dataset):
         rank = self.global_rank
         epoch = self.real_epoch
         world_size = self.world_size
+        
+
+        # if args.chat_enhance_data:
+        #     p = random.random()
+        #     if p < args.chat_enhance_ratio:
+        #         pass #todo add belle chat data
         # print(f"epoch {epoch} idx {idx} rank {rank}/{world_size}")
 
         if args.data_type == "wds_img":
@@ -163,78 +166,64 @@ class MyDataset(Dataset):
                 magic_prime = args.magic_prime
                 data = self.data
 
-                if args.my_pile_stage > 0:
+                if args.my_pile_stage > 0 and args.my_pile_stage != 4:
                     ii = 1 + epoch * self.samples_per_epoch + (idx * world_size) + rank
 
                     if args.my_qa_mask > 0:
                         ii_orig = ii
                         if ii % 2 == 0:
-                            ii = -1
+                            ii = (ii // 2) * args.magic_prime
+                            if args.ctx_len == 1024:
+                                magic_prime = 324331313
+                            elif args.ctx_len == 2048:
+                                magic_prime = 162165671
+                            elif args.ctx_len == 4096:
+                                magic_prime = 81082817
                             data = self.data_pile
                         else:
                             ii = ii // 2
-                    if data == self.data_pile:
-                        i = np.random.randint(0, self.data_pile_size - req_len)
-                    else:
-                        if args.my_pile_stage == 4 or ii < args.my_random_steps:
-                            # cheat: pick a random spot in dataset
-                            if args.my_pile_version == 1:
-                                i = np.random.randint(0, self.data_size - req_len)
-                            else:
-                                i = np.random.randint(0, self.data_size)
-                        else:
-                            ii = ii - args.my_random_steps
-                            factor = (math.sqrt(5) - 1) / 2
-                            factor = int(magic_prime * factor)
-                            i = ((factor * ii * ii * ii) % magic_prime) * ctx_len
-                            i = i + args.my_pile_shift
+
+                    factor = (math.sqrt(5) - 1) / 2
+                    factor = int(magic_prime * factor)
+                    i = ((factor * ii * ii * ii) % magic_prime) * ctx_len
+                    if (args.my_qa_mask == 0) or (data == self.data_pile):
+                        i = i + args.my_pile_shift
                     # print(f"epoch {epoch} idx {idx} rank {rank}/{world_size} ii {ii} pos {round(i / self.data_size, 3)}")
                 else:
                     # cheat: pick a random spot in dataset
                     i = np.random.randint(0, self.data_size - req_len)
-
                 if args.data_type == "binidx":
-                    if args.my_pile_version == 1:
-                        dix = data.get(idx=0, offset=i, length=req_len).astype(int)
-                        if args.my_script_align == 1:
-                            #实现功能：对齐脚本，保证开头是说话人或者旁白描述（即刚刚经历过双重换行）
-                            #做法是在dix里找到第一处双重换行，然后重新从此处构造dix
-                            count_newline = 0
-                            j = 0
-                            while True:
-                                if i == 0:
-                                    break #如果是全局开头，现在的dix就可以用
-                                if dix[j]==TOKEN_NEWLINE: #如果遇到换行，计数器加一
-                                    count_newline += 1
-                                else: #如果不是换行符，则进行判断
-                                    if count_newline >= 2: #已经经历了两个以上的连续换行
-                                        if i < self.data_size-req_len: #如果i+req_len不超限，直接构造新的dix
-                                            dix = data.get(idx=0, offset=i, length=req_len).astype(int)
-                                            break
-                                        else: #如果i+req_len超限了，重新选择i,然后重新搜索
-                                            i = np.random.randint(0, self.data_size - req_len)
-                                            dix = data.get(idx=0, offset=i, length=req_len).astype(int)
-                                            j = 0
-                                            count_newline = 0
-                                            continue
-                                    else: #当前不是换行，并且经历了不到2个换行，则重置计数器
+                    dix = data.get(idx=0, offset=i, length=req_len).astype(int)
+                    if args.my_script_align == 1:
+                        #实现功能：对齐脚本，保证开头是说话人或者旁白描述（即刚刚经历过双重换行）
+                        #做法是在dix里找到第一处双重换行，然后重新从此处构造dix
+                        count_newline = 0
+                        j = 0
+                        while True:
+                            if i == 0:
+                                break #如果是全局开头，现在的dix就可以用
+                            if dix[j]==TOKEN_NEWLINE: #如果遇到换行，计数器加一
+                                count_newline += 1
+                            else: #如果不是换行符，则进行判断
+                                if count_newline >= 2: #已经经历了两个以上的连续换行
+                                    if i < self.data_size-req_len: #如果i+req_len不超限，直接构造新的dix
+                                        dix = data.get(idx=0, offset=i, length=req_len).astype(int)
+                                        break
+                                    else: #如果i+req_len超限了，重新选择i,然后重新搜索
+                                        i = np.random.randint(0, self.data_size - req_len)
+                                        dix = data.get(idx=0, offset=i, length=req_len).astype(int)
+                                        j = 0
                                         count_newline = 0
-                                i += 1
-                                j += 1
-                                if j >= req_len: #j超出了dix索引范围，则重新选择i,然后重新搜索
-                                    i = np.random.randint(0, self.data_size - req_len)
-                                    dix = data.get(idx=0, offset=i, length=req_len).astype(int)
-                                    j = 0
+                                        continue
+                                else: #当前不是换行，并且经历了不到2个换行，则重置计数器
                                     count_newline = 0
-                    else:
-                        # self.data : cutoff, chunk_count, data
-                        for j in range(len(data)):
-                            if i < data[j][0]:
-                                ii = i
-                                i = (i - (data[j-1][0] if j > 0 else 0)) % data[j][1]
-                                dix = data[j][2].get(idx=0, offset=i, length=req_len).astype(int)
-                                # print(ii, j, i)
-                                break
+                            i += 1
+                            j += 1
+                            if j >= req_len: #j超出了dix索引范围，则重新选择i,然后重新搜索
+                                i = np.random.randint(0, self.data_size - req_len)
+                                dix = data.get(idx=0, offset=i, length=req_len).astype(int)
+                                j = 0
+                                count_newline = 0
                 elif args.data_type == "numpy":
                     dix = data[i : i + req_len]
                 else:
@@ -298,3 +287,26 @@ class MyDataset(Dataset):
                     return x, y, z
 
             return x, y
+
+
+class WNDataset(Dataset):
+    def __init__(self, args):
+        self.args = args
+        #WNDataset，只用来处理定向预测数据。
+        #用于处理定向预测特定人物发言的数据，或者总结数据
+        #---Global Info---
+        #以下为一段发生在嘉祥和巧克力之间的互动片段。
+        #嘉祥是一名男性人类。巧克力是一名女性猫娘。
+        
+
+    def __len__(self):
+        return self.args.epoch_steps * self.args.micro_bsz
+
+    def __getitem__(self, idx):
+        args = self.args
+        rank = self.global_rank
+        epoch = self.real_epoch
+        world_size = self.world_size
+        
+
+        

@@ -3,6 +3,7 @@ import torch
 from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 from pytorch_lightning.utilities import rank_zero_info, rank_zero_only
+from .model import LORA_CONFIG
 
 def my_save(dd, ff):
     if '14b-run1' not in ff:
@@ -22,10 +23,8 @@ class train_callback(pl.Callback):
         args = self.args
         # if args.cuda_cleanup > 0:
         #     torch.cuda.empty_cache()
-        real_step = trainer.global_step + args.epoch_begin * args.epoch_steps
-        if args.debug:
-            import pdb
-            pdb.set_trace()
+        real_step = trainer.global_step + args.previous_step#args.epoch_begin * args.epoch_steps
+
         # LR schedule
         w_step = args.warmup_steps
         if args.lr_final == args.lr_init or args.epoch_count == 0:
@@ -85,8 +84,8 @@ class train_callback(pl.Callback):
         args = self.args
         if trainer.is_global_zero:  # logging
             t_now = time.time_ns()
-            token_per_step = args.ctx_len * args.real_bsz
-            real_step = trainer.global_step + args.epoch_begin * args.epoch_steps
+            token_per_step = args.ctx_len * args.real_bsz * (trainer.accumulate_grad_batches  or 1)
+            real_step = trainer.global_step + args.previous_step #+ args.epoch_begin * args.epoch_steps
             kt_s = 0
             try:
                 t_cost = (t_now - trainer.my_time_ns) / 1e9
@@ -108,16 +107,16 @@ class train_callback(pl.Callback):
                 lll = {"loss": trainer.my_loss, "lr": trainer.my_lr, "Gtokens": real_step * token_per_step / 1e9}
                 if kt_s > 0:
                     lll["kt/s"] = kt_s
-                trainer.my_wandb.log(lll, step=int(real_step))
+                trainer.my_wandb.log(lll, step=int(real_step+args.log_add_step)) #平移一下wandb曲线
             if args.magic_prime > 0:
                 expand_factor = 2 if args.my_qa_mask > 0 else 1
-                if int(real_step) == int(args.magic_prime * expand_factor // args.real_bsz) - 1 + int(args.my_random_steps):
+                if int(real_step) == int(args.magic_prime * expand_factor // args.real_bsz) - 1:
                     to_save_dict = pl_module.state_dict()
                     my_save(
                         to_save_dict,
                         f"{args.proj_dir}/rwkv-final.pth",
                     )
-                
+
 
     def on_train_epoch_start(self, trainer, pl_module):
         args = self.args
@@ -140,10 +139,22 @@ class train_callback(pl.Callback):
                             to_save_dict[k] = raw_dict[k]
                 else:
                     to_save_dict = pl_module.state_dict()
+
+                if args.lora:
+                    enable_time_finetune = 'time' in LORA_CONFIG["parts"]
+                    enable_ln_finetune = 'ln' in LORA_CONFIG["parts"]
+                    lora_dict = {}
+                    for name, state in to_save_dict.items():
+                        if ('.lora_' in name
+                                or (enable_time_finetune and '.time_' in name)
+                                or (enable_ln_finetune and '.ln' in name)):
+                            lora_dict[name] = state
+                    to_save_dict = lora_dict
+
                 try:
                     my_save(
                         to_save_dict,
-                        f"{args.proj_dir}/rwkv-{args.epoch_begin + trainer.current_epoch}.pth",
+                        f"{args.proj_dir}/rwkv-{args.epoch_begin + trainer.current_epoch}-{trainer.global_step+self.args.previous_step}.pth",
                     )
                 except Exception as e:
                     print('Error\n\n', e, '\n\n')
