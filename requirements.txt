@@ -1,4 +1,10 @@
+--extra-index-url https://download.pytorch.org/whl/cu117
 git+https://github.com/EleutherAI/lm_dataformat.git
 ftfy>=6.0.1
-deepspeed
+torch==2.0.0+cu117
+pytorch-lightning==1.9.2
+deepspeed==0.9.1
 transformers>=4.24.0
+sentencepiece
+wandb
+tokenizers
