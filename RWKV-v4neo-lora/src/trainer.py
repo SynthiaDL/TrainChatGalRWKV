@@ -100,7 +100,8 @@ class train_callback(pl.Callback):
             trainer.my_loss_count += 1
             trainer.my_epoch_loss = trainer.my_loss_sum / trainer.my_loss_count
             self.log("lr", trainer.my_lr, prog_bar=True, on_step=True)
-            self.log("loss", trainer.my_epoch_loss, prog_bar=True, on_step=True)
+            self.log("loss", trainer.my_loss, prog_bar=True, on_step=True)
+            self.log("avg_loss", trainer.my_epoch_loss, prog_bar=True, on_step=True)
             # self.log("s", real_step, prog_bar=True, on_step=True)
 
             if len(args.wandb) > 0:
