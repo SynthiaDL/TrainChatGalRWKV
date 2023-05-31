@@ -120,7 +120,6 @@ if __name__ == "__main__":
     parser.add_argument("--accumulate_grad_batches_dict", default=None, type=str)
 
     parser.add_argument("--debug",action="store_true",default=False)
-    parser.add_argument("--weight_decay", default=0, type=float)
 
     parser = Trainer.add_argparse_args(parser)
     args = parser.parse_args()

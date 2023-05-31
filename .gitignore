@@ -146,6 +146,3 @@ RWKV-v4neo-lora/out*/
 RWKV-v4neo-lora/wandb/
 data/
 .vscode/
-
-# Pycharm
-.idea/
