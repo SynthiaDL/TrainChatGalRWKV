@@ -59,6 +59,9 @@ if __name__ == "__main__":
     parser.add_argument("--vocab_size", default=0, type=int)  # vocab_size = 0 means auto (for char-level LM and .txt data)
 
     parser.add_argument("--ctx_len", default=1024, type=int)
+    parser.add_argument("--initial_ctx_len", default=None, type=int)
+    parser.add_argument("--ctx_warmup_steps", default=1, type=int)
+    parser.add_argument("--ctx_parts", default=None, type=int)
     parser.add_argument("--epoch_steps", default=1000, type=int)  # a mini "epoch" has [epoch_steps] steps
     parser.add_argument("--epoch_count", default=500, type=int)  # train for this many "epochs". will continue afterwards with lr = lr_final
     parser.add_argument("--epoch_begin", default=0, type=int)  # if you load a model trained for x "epochs", set epoch_begin = x
@@ -84,6 +87,7 @@ if __name__ == "__main__":
     parser.add_argument("--adam_eps", default=1e-8, type=float)
 
     parser.add_argument("--grad_cp", default=0, type=int)  # gradient checkpt: saves VRAM, but slower
+    parser.add_argument("--state_cp", default=0, type=int)  # state checkpt: saves VRAM, but slower
     parser.add_argument("--my_pile_stage", default=0, type=int)  # my special pile mode
     parser.add_argument("--my_pile_shift", default=-1, type=int)  # my special pile mode - text shift
     parser.add_argument("--my_pile_edecay", default=0, type=int)
@@ -118,7 +122,9 @@ if __name__ == "__main__":
     parser.add_argument("--my_script_align", default=0, type=int)
     parser.add_argument("--my_script_mask", default=None, type=str)
     parser.add_argument("--accumulate_grad_batches_dict", default=None, type=str)
-
+    parser.add_argument("--instruct_data_file", default="", type=str)
+    parser.add_argument("--instruct_data_ratio", default=0., type=float)
+    parser.add_argument("--names_data_file", default=None, type=str)
     parser.add_argument("--debug",action="store_true",default=False)
 
     parser = Trainer.add_argparse_args(parser)
@@ -166,7 +172,12 @@ if __name__ == "__main__":
     args.max_epochs = -1  # continue forever
     args.betas = (args.beta1, args.beta2)
     args.real_bsz = int(args.num_nodes) * int(args.devices) * args.micro_bsz
-    os.environ["RWKV_T_MAX"] = str(args.ctx_len)
+    if args.ctx_parts is None:
+        os.environ["RWKV_T_MAX"] = str(args.ctx_len)
+    else:
+        os.environ['RWKV_PARTS'] = str(args.ctx_parts)
+        os.environ['RWKV_STATE'] = "1" #开启后编译WKV_STATE的cuda kernal
+        os.environ["RWKV_T_MAX"] = str((args.ctx_len+args.ctx_parts-1)//args.ctx_parts) #CUDA kernal的实际最大输入上下文长度
     os.environ["RWKV_MY_TESTING"] = args.my_testing
     if args.dim_att <= 0:
         args.dim_att = args.n_embd
@@ -259,7 +270,7 @@ if __name__ == "__main__":
     )
     rank_zero_info(str(vars(args)) + "\n")
 
-    assert args.data_type in ["utf-8", "utf-16le", "numpy", "binidx", "dummy", "wds_img", "uint16"]
+    assert args.data_type in ["utf-8", "utf-16le", "numpy", "binidx", "dummy", "wds_img", "uint16",'jsonl']
 
     if args.lr_final == 0 or args.lr_init == 0:
         rank_zero_info("\n\nNote: lr_final = 0 or lr_init = 0. Using linear LR schedule instead.\n\n")
@@ -275,7 +286,7 @@ if __name__ == "__main__":
     os.environ["RWKV_JIT_ON"] = "1"
     if "deepspeed_stage_3" in strategy:
         os.environ["RWKV_JIT_ON"] = "0"
-    if args.lora and args.grad_cp == 1:
+    if args.lora or args.grad_cp == 1:
         print('!!!!! LoRA Warning: Gradient Checkpointing requires JIT off, disabling it')
         os.environ["RWKV_JIT_ON"] = "0"
 
@@ -308,13 +319,16 @@ if __name__ == "__main__":
         assert args.lora, "LoRA not yet supported for RWKV_IMG"
         model = RWKV_IMG(args)
     else:
-        from src.model import RWKV, LORA_CONFIG, LoraLinear
+        if args.state_cp==1:
+            from src.model_state import RWKV, LORA_CONFIG, LoraLinear
+        else:
+            from src.model import RWKV, LORA_CONFIG, LoraLinear
         if args.lora:
             assert args.lora_r > 0, "LoRA should have its `r` > 0"
             LORA_CONFIG["r"] = args.lora_r
             LORA_CONFIG["alpha"] = args.lora_alpha
             LORA_CONFIG["dropout"] = args.lora_dropout
-            LORA_CONFIG["parts"] = set(str(args.lora_parts).split(','))
+            LORA_CONFIG["parts"] = list(set(str(args.lora_parts).split(',')))
             LORA_CONFIG["layers"] = None
             if args.lora_layers:
                 layers = []
@@ -329,6 +343,7 @@ if __name__ == "__main__":
                         raise NotImplementedError("layer_filter Not implemented:",args.layer_filter)
                 layers = sorted(set(layers))
                 LORA_CONFIG["layers"] = layers
+            args.LORA_CONFIG = LORA_CONFIG
             enable_time_finetune = 'time' in LORA_CONFIG["parts"]
             enable_ln_finetune = 'ln' in LORA_CONFIG["parts"]
         model = RWKV(args)
@@ -401,7 +416,7 @@ if __name__ == "__main__":
         callbacks=[train_callback(args)],
     )
     if args.accelerator=="gpu" and args.strategy == "single_device":
-        trainer.strategy._root_device = torch.device(0)
+        trainer.strategy._root_device = torch.device(0) #让single device可用，否则会出现cpu
 
     if trainer.global_rank == 0:
         for n in model.state_dict():
@@ -463,5 +478,5 @@ if __name__ == "__main__":
             print('Error\n\n', e, '\n\n')
     atexit.register(leave_script,args)
 
-
+    trainer.training_dataset = train_data
     trainer.fit(model, data_loader)

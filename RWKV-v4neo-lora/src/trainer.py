@@ -3,7 +3,7 @@ import torch
 from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 from pytorch_lightning.utilities import rank_zero_info, rank_zero_only
-from .model import LORA_CONFIG
+# from .model_state import LORA_CONFIG
 
 def my_save(dd, ff):
     if '14b-run1' not in ff:
@@ -18,6 +18,33 @@ class train_callback(pl.Callback):
     def __init__(self, args):
         super().__init__()
         self.args = args
+
+    def on_fit_start(self, trainer, pl_module) -> None:
+        args = self.args
+        if trainer.is_global_zero:  # logging
+            trainer.my_loss=0.
+            trainer.my_backward_step = 0
+            trainer.my_loss_sum = 0
+            trainer.my_loss_count = 0
+            trainer.my_token_count=0
+            trainer.my_log = open(args.proj_dir + "/train_log.txt", "a")
+            trainer.my_log.write(f"NEW RUN {args.my_timestamp}\n{vars(self.args)}\n")
+            try:
+                print(f"\n{trainer.strategy.config}\n")
+                trainer.my_log.write(f"{trainer.strategy.config}\n")
+            except:
+                pass
+            trainer.my_log.flush()
+            if len(args.wandb) > 0:
+                print("Login to wandb...")
+                import wandb
+                wandb.init(
+                    project=args.wandb,
+                    name=args.run_name + " " + args.my_timestamp,
+                    config=args,
+                    save_code=False,
+                )
+                trainer.my_wandb = wandb
 
     def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
         args = self.args
@@ -55,68 +82,54 @@ class train_callback(pl.Callback):
                 param_group["lr"] = lr
 
         trainer.my_lr = lr
+        
         # rank_zero_info(f"{real_step} {lr}")
 
-        if trainer.global_step == 0:
-            if trainer.is_global_zero:  # logging
-                trainer.my_loss_sum = 0
-                trainer.my_loss_count = 0
-                trainer.my_log = open(args.proj_dir + "/train_log.txt", "a")
-                trainer.my_log.write(f"NEW RUN {args.my_timestamp}\n{vars(self.args)}\n")
-                try:
-                    print(f"\n{trainer.strategy.config}\n")
-                    trainer.my_log.write(f"{trainer.strategy.config}\n")
-                except:
-                    pass
-                trainer.my_log.flush()
-                if len(args.wandb) > 0:
-                    print("Login to wandb...")
-                    import wandb
-                    wandb.init(
-                        project=args.wandb,
-                        name=args.run_name + " " + args.my_timestamp,
-                        config=args,
-                        save_code=False,
-                    )
-                    trainer.my_wandb = wandb
+
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         args = self.args
         if trainer.is_global_zero:  # logging
             t_now = time.time_ns()
-            token_per_step = args.ctx_len * args.real_bsz * (trainer.accumulate_grad_batches  or 1)
+            token_per_step = batch[0].size(0) * batch[0].size(1)
             real_step = trainer.global_step + args.previous_step #+ args.epoch_begin * args.epoch_steps
             kt_s = 0
             try:
                 t_cost = (t_now - trainer.my_time_ns) / 1e9
                 kt_s = token_per_step / t_cost / 1000
-                self.log("REAL it/s", 1.0 / t_cost, prog_bar=True, on_step=True)
+                # self.log("REAL it/s", 1.0 / t_cost, prog_bar=True, on_step=True)
+                # self.log("wkvf",args.forward_wkv_count,prog_bar=True, on_step=True)
+                # self.log("wkvb",args.backward_wkv_count,prog_bar=True, on_step=True)
                 self.log("Kt/s", kt_s, prog_bar=True, on_step=True)
             except:
                 pass
+            trainer.my_token_count += token_per_step
             trainer.my_time_ns = t_now
-            trainer.my_loss = trainer.my_loss_all.float().mean().item()
-            trainer.my_loss_sum += trainer.my_loss
-            trainer.my_loss_count += 1
-            trainer.my_epoch_loss = trainer.my_loss_sum / trainer.my_loss_count
-            self.log("lr", trainer.my_lr, prog_bar=True, on_step=True)
-            self.log("loss", trainer.my_loss, prog_bar=True, on_step=True)
-            self.log("avg_loss", trainer.my_epoch_loss, prog_bar=True, on_step=True)
-            # self.log("s", real_step, prog_bar=True, on_step=True)
+            # trainer.my_loss += trainer.my_loss_all.float().mean().item()/trainer.accumulate_grad_batches
+            # self.log("back",trainer.my_backward_step, prog_bar=True, on_step=True)
+            if (trainer.my_backward_step) % trainer.accumulate_grad_batches == 0:
+                trainer.my_loss_sum += trainer.my_loss
+                trainer.my_loss_count += 1
+                trainer.my_epoch_loss = trainer.my_loss_sum / trainer.my_loss_count
+                self.log("lr", trainer.my_lr, prog_bar=True, on_step=True)
+                self.log("loss", trainer.my_epoch_loss, prog_bar=True, on_step=True)
+                
+                # self.log("s", real_step, prog_bar=True, on_step=True)
 
-            if len(args.wandb) > 0:
-                lll = {"loss": trainer.my_loss, "lr": trainer.my_lr, "Gtokens": real_step * token_per_step / 1e9}
-                if kt_s > 0:
-                    lll["kt/s"] = kt_s
-                trainer.my_wandb.log(lll, step=int(real_step+args.log_add_step)) #平移一下wandb曲线
-            if args.magic_prime > 0:
-                expand_factor = 2 if args.my_qa_mask > 0 else 1
-                if int(real_step) == int(args.magic_prime * expand_factor // args.real_bsz) - 1:
-                    to_save_dict = pl_module.state_dict()
-                    my_save(
-                        to_save_dict,
-                        f"{args.proj_dir}/rwkv-final.pth",
-                    )
+                if len(args.wandb) > 0:
+                    lll = {"loss": trainer.my_loss, "lr": trainer.my_lr, "Gtokens": trainer.my_token_count / 1e9}
+                    if kt_s > 0:
+                        lll["kt/s"] = kt_s
+                    trainer.my_wandb.log(lll, step=int(real_step+args.log_add_step)) #平移一下wandb曲线
+                if args.magic_prime > 0:
+                    expand_factor = 2 if args.my_qa_mask > 0 else 1
+                    if int(real_step) == int(args.magic_prime * expand_factor // args.real_bsz) - 1:
+                        to_save_dict = pl_module.state_dict()
+                        my_save(
+                            to_save_dict,
+                            f"{args.proj_dir}/rwkv-final.pth",
+                        )
+                trainer.my_loss=0.
 
 
     def on_train_epoch_start(self, trainer, pl_module):
@@ -126,6 +139,7 @@ class train_callback(pl.Callback):
         dataset.global_rank = trainer.global_rank
         dataset.real_epoch = int(args.epoch_begin + trainer.current_epoch)
         dataset.world_size = trainer.world_size
+        dataset.current_warmup_step = trainer.global_step * args.micro_bsz * (args.accumulate_grad_batches or 1)
         # print(f'########## world_size {dataset.world_size} global_rank {dataset.global_rank} real_epoch {dataset.real_epoch} ##########')
 
     def on_train_epoch_end(self, trainer, pl_module):
@@ -142,6 +156,7 @@ class train_callback(pl.Callback):
                     to_save_dict = pl_module.state_dict()
 
                 if args.lora:
+                    LORA_CONFIG = args.LORA_CONFIG
                     enable_time_finetune = 'time' in LORA_CONFIG["parts"]
                     enable_ln_finetune = 'ln' in LORA_CONFIG["parts"]
                     lora_dict = {}

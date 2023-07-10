@@ -2,7 +2,7 @@
 # The RWKV Language Model - https://github.com/BlinkDL/RWKV-LM
 ########################################################################################################
 
-import json, math, random, os, sys
+import json, math, random, os, sys,re
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -10,13 +10,28 @@ from pytorch_lightning.utilities import rank_zero_info
 from .binidx import MMapIndexedDataset
 from .utils import MaybeIsPrime
 
+from transformers import PreTrainedTokenizerFast
+
 TOKEN_NEWLINE = 187
-#TOKEN_NEWLINE = 11
+# DOUBLE_NEWLINE = torch.tensor([187,187])
+DOUBLE_NEWLINE = [187,187]
+ALICE_RESPONSE_PREFIX = torch.tensor([187,187,2422,547,27])
+
+INSTRUCT_PROMPTS = [
+    "{{{user}正在和{bot}交流，{bot}非常聪明，正在帮助{user}解决问题}}",
+    "{{{bot}是一个知识渊博的专家，正在和{user}交谈。}}",
+    "{{{bot}懂得数学、物理等各种学科，经常帮助{user}}}",
+]
 
 class MyDataset(Dataset):
     def __init__(self, args):
         self.args = args
-
+        self.ctx_len = args.initial_ctx_len or args.ctx_len
+        self.final_ctx_len = args.ctx_len
+        self.warm_up_steps = max(args.ctx_warmup_steps*args.micro_bsz * (args.accumulate_grad_batches or 1),1)
+        self.current_warmup_step = 0
+        self.update_per_steps = args.micro_bsz * (args.accumulate_grad_batches or 1)
+        
         if args.data_type == "binidx":
             self.vocab_size = args.vocab_size
             rank_zero_info(f"Current vocab size = {self.vocab_size} (make sure it's correct)")
@@ -31,14 +46,28 @@ class MyDataset(Dataset):
                 exit(0)
             else:
                 self.data = MMapIndexedDataset(args.data_file)
-                #self.data_size = len(self.data._bin_buffer) // 2
-                self.data_size = len(self.data._bin_buffer) // self.data._index._dtype_size
+                self.data_size = len(self.data._bin_buffer) // self.data._index._dtype_siz
                 rank_zero_info(f"Data has {self.data_size} tokens.")
 
-            # if args.extra_data_file:
-            #     self.extra_data = MMapIndexedDataset(args.extra_dialog_data_file)
-            #     self.extra_data_size = len(self.extra_data._bin_buffer) // 2
-            #     rank_zero_info(f"Extra Data has {self.data_size} tokens.")
+            if args.instruct_data_file:
+                self.main_data = self.data
+                self.main_data_size = self.data_size
+                # self.instruct_data = MMapIndexedDataset(args.instruct_data_file)
+                # self.instruct_data_size = len(self.instruct_data._bin_buffer) // 2
+                # rank_zero_info(f"Extra instruct chat Data has {self.instruct_data_size} tokens.")
+                self.instruct_data = []
+                with open(args.instruct_data_file) as f:
+                    for line in f:
+                        d = json.loads(line)
+                        self.instruct_data.append(d['text'])
+                #硬编码！！！
+                # 读取names,然后替换Alice Bob人名
+                if args.names_data_file:
+                    with open(args.names_data_file) as f:
+                        self.names_data = json.load(f)
+                        self.max_replace = 10
+                self.tokenizer = PreTrainedTokenizerFast(tokenizer_file="./20B_tokenizer.json")
+                
 
             if args.my_qa_mask > 0:
                 self.data_pile = MMapIndexedDataset('/fsx/BlinkDL/pile/pile_20B_tokenizer_text_document')
@@ -49,7 +78,7 @@ class MyDataset(Dataset):
                 self.samples_per_epoch = args.epoch_steps * args.real_bsz
                 assert self.samples_per_epoch == 40320
                 rank_zero_info(f"########## Pile 20b-tokenized stage {args.my_pile_stage} ##########")
-                dataset_slot = self.data_size // args.ctx_len
+                dataset_slot = self.data_size // self.ctx_len
                 if args.my_pile_stage != 4:
                     assert MaybeIsPrime(args.magic_prime)
                     assert args.magic_prime % 3 == 2
@@ -101,6 +130,47 @@ class MyDataset(Dataset):
             self.stoi = {ch: i for i, ch in enumerate(unique)}
             self.itos = {i: ch for i, ch in enumerate(unique)}
 
+    def sample_name_pair(self):
+        if self.args.names_data_file:
+            doc_names = {}
+            while len(doc_names)<2:
+                doc_names, = random.choices(self.names_data['doc_names'],weights = self.names_data['doc_weights'])
+                names,name_weights = list(doc_names.keys()),list(doc_names.values())
+            i1, = random.choices(list(range(len(names))),weights = name_weights)
+            name_weights[i1]=0
+            i2, = random.choices(list(range(len(names))),weights = name_weights)
+            return names[i1],names[i2]
+        else:
+            return "Bob", "Alice"
+    
+
+    def find_someone_dialogue_span(self,text,name, 
+        # pattern=r"(?:^|\n\n)(?P<name>{name})\:(?P<content>.*?)(?=\n\n|$)"):
+        pattern=r"(?:^|(?<=\n\n))(?P<name>{name})\:(?P<content>.*?(\n\n|$))"):
+        pattern = pattern.format(name=re.escape(name))
+        # pattern=r"(?:^|\n\n)(?P<name>\w+)\:(?P<content>.*?)(?=\n\n|$)"):
+        return [m.span("content") for m in re.finditer(pattern,text,re.DOTALL)]
+
+    def mask_except_for_name(self,text,name):
+        name_spans = self.find_someone_dialogue_span(text,name)
+        tokenized = self.tokenizer(text,return_offsets_mapping=True)
+        dix = tokenized.input_ids
+        # x = dix[:-1]
+        # y = dix[1:]
+        # z = [1] * len(x)
+        dix_with_mask = dix.copy()
+        if name_spans:
+            span_start,span_end = name_spans.pop(0)
+            for i,(start,end) in enumerate(tokenized.offset_mapping):
+                if end <= span_start or start>=span_end:
+                    dix_with_mask[i] = -100
+                    # z[i] = 0
+                if start>=span_end and name_spans:
+                    span_start,span_end = name_spans.pop(0)
+        else:
+            print("Cannot find name spans", name)
+            print(text)
+        return dix,dix_with_mask
     def __len__(self):
         return self.args.epoch_steps * self.args.micro_bsz
 
@@ -109,13 +179,94 @@ class MyDataset(Dataset):
         rank = self.global_rank
         epoch = self.real_epoch
         world_size = self.world_size
-        
-
+        if self.ctx_len<self.final_ctx_len:
+            if self.current_warmup_step%self.update_per_steps == 0:
+                self.ctx_len = int(min(self.current_warmup_step/self.warm_up_steps,1)*\
+                    (args.ctx_len-args.initial_ctx_len)+args.initial_ctx_len)
+            self.current_warmup_step += 1
+        ctx_len = self.ctx_len
         # if args.chat_enhance_data:
         #     p = random.random()
         #     if p < args.chat_enhance_ratio:
         #         pass #todo add belle chat data
         # print(f"epoch {epoch} idx {idx} rank {rank}/{world_size}")
+        if args.instruct_data_file:
+            #先只考虑batchsize=1！不考虑padding问题
+            #之后或许可以做一个状态重置输入，这样就可以batch，不过可能得改cuda kernal了。
+            if random.random()<args.instruct_data_ratio:
+                dix_concat = []
+                dix_with_mask_concat = []
+                # y_concat = []
+                # z_concat = []
+                replaced_count = 0
+                names = self.sample_name_pair()
+                while len(dix_concat)<=ctx_len:
+                    seq = random.choice(self.instruct_data)
+                    if replaced_count == 0:
+                        seq = random.choice(INSTRUCT_PROMPTS).format(user=names[0],bot=names[1])+"\n\n" + seq
+                    (seq,num_replaced) = re.subn(r"(^|\n)Bob: ",r"\1"+names[0]+": ",seq) 
+                    (seq,num_replaced) = re.subn(r"(^|\n)Alice: ",r"\1"+names[1]+": ",seq) 
+                    replaced_count += num_replaced
+                    seq = seq.strip()
+                    dix,dix_with_mask = self.mask_except_for_name(seq,names[1])
+                    if replaced_count >= self.max_replace:
+                        replaced_count = 0
+                        names = self.sample_name_pair()
+                    dix += DOUBLE_NEWLINE
+                    if dix_with_mask[-1] == -100:
+                        dix_with_mask += [-100,-100]
+                    else:
+                        dix_with_mask += DOUBLE_NEWLINE
+
+                    
+                    # dix = self.tokenizer(seq).input_ids
+                    # dix = dix + DOUBLE_NEWLINE
+                    # x = dix[:-1].copy()
+                    # y = dix[1:].copy()
+                    # z = [1] * len(x)
+                    # count = 0
+                    # for i in range(len(DOUBLE_NEWLINE),len(dix)):
+                    #     if (dix[i-2:i] == DOUBLE_NEWLINE):
+                    #         count+=1
+                    #     if count>=2:
+                    #         for j in range(i):
+                    #             y[j] = -100
+                    #             z[j] = 0
+                    #         break
+                    dix_concat += dix
+                    dix_with_mask_concat += dix_with_mask
+                x = torch.tensor(dix_concat[:ctx_len],dtype=torch.long)
+                y = torch.tensor(dix_with_mask_concat[1:ctx_len+1],dtype=torch.long)
+                z = torch.ones((ctx_len,),dtype=torch.bfloat16)
+                z[y==-100] = 0.
+                return (
+                    x,y,z
+                )
+
+            # if random.random() < args.instruct_data_ratio:
+            #     x_concat = torch.tensor([],dtype=torch.long)
+            #     y_concat = torch.tensor([],dtype=torch.long)
+            #     z_concat = torch.tensor([],dtype=torch.long)
+            #     while len(x_concat)<ctx_len:
+            #         dix = random.choice(self.instruct_data)
+            #         dix = torch.tensor(dix.astype(int))
+            #         x = torch.zeros(len(dix)+1,dtype=torch.long) + TOKEN_NEWLINE
+            #         x[:len(dix)-1] = dix[:-1]
+            #         y = torch.zeros(len(dix)+1,dtype=torch.long) + TOKEN_NEWLINE
+            #         y[:len(dix)-1] = dix[1:]
+            #         z = torch.ones(len(dix)+1, dtype=torch.bfloat16)
+            #         for i in range(len(ALICE_RESPONSE_PREFIX),len(dix)):
+            #             if (dix[i-5:i] == ALICE_RESPONSE_PREFIX).all():
+            #                 y[:i] = -100
+            #                 z[:i] = 0
+            #                 break
+            #         x_concat = torch.cat((x_concat,x))
+            #         y_concat = torch.cat((y_concat,y))
+            #         z_concat = torch.cat((z_concat,z))
+            #     return x_concat[:ctx_len].contiguous(), y_concat[:ctx_len].contiguous(), z_concat[:ctx_len].contiguous()
+
+                    
+                
 
         if args.data_type == "wds_img":
             def init_wds(self, bias=0):
@@ -163,7 +314,6 @@ class MyDataset(Dataset):
                 x = torch.tensor(dix[:-1], dtype=torch.long)
                 y = torch.tensor(dix[1:], dtype=torch.long)
             else:
-                ctx_len = args.ctx_len
                 req_len = ctx_len + 1
                 magic_prime = args.magic_prime
                 data = self.data
@@ -175,11 +325,11 @@ class MyDataset(Dataset):
                         ii_orig = ii
                         if ii % 2 == 0:
                             ii = (ii // 2) * args.magic_prime
-                            if args.ctx_len == 1024:
+                            if self.ctx_len == 1024:
                                 magic_prime = 324331313
-                            elif args.ctx_len == 2048:
+                            elif self.ctx_len == 2048:
                                 magic_prime = 162165671
-                            elif args.ctx_len == 4096:
+                            elif self.ctx_len == 4096:
                                 magic_prime = 81082817
                             data = self.data_pile
                         else:
@@ -286,6 +436,7 @@ class MyDataset(Dataset):
                 #     exit(0)
 
                 if args.my_qa_mask == 1 or args.my_script_mask:
+                    y[z==0] = -100
                     return x, y, z
 
             return x, y

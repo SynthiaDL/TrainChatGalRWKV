@@ -55,71 +55,106 @@ T_MAX = int(os.environ["RWKV_T_MAX"])  # TAKES LOTS OF VRAM!
 from torch.utils.cpp_extension import load
 
 if os.environ["RWKV_FLOAT_MODE"] == "bf16":
-    if os.environ.get("WN_WU_GRAD_CLIP"):
-        print("Use WN_WU_GRAD_CLIP")
-        wkv_cuda = load(name=f"wkv_{T_MAX}_bf16", sources=["cuda/wkv_op_bf16_gclip.cpp", "cuda/wkv_cuda_bf16_gclip.cu"], 
-            verbose=True, extra_cuda_cflags=["-t 4", "-std=c++17", "-res-usage", "--maxrregcount 60", "-O0",
-                #"--use_fast_math", 
-                # "-O3", "-Xptxas -O3", 
-                # "--extra-device-vectorization", 
-                f"-DTmax={T_MAX}", f"-DMAX_gw=\\({1e5}\\) -DMIN_gw=\\({-1e5}\\) -DMAX_gu=\\({1e5}\\) -DMIN_gu=\\({-1e5}\\)"])
-    else:
-        wkv_cuda = load(name=f"wkv_{T_MAX}_bf16", sources=["cuda/wkv_op_bf16.cpp", "cuda/wkv_cuda_bf16.cu"], verbose=True, extra_cuda_cflags=["-t 4", "-std=c++17", "-res-usage", "--maxrregcount 60", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization", f"-DTmax={T_MAX}"])
-    class WKV(torch.autograd.Function):
-        @staticmethod
-        def forward(ctx, B, T, C, w, u, k, v):
-            ctx.B = B
-            ctx.T = T
-            ctx.C = C
-            assert T <= T_MAX
-            assert B * C % min(C, 32) == 0
-            w = -torch.exp(w.float().contiguous())
-            u = u.contiguous()
-            k = k.contiguous()
-            v = v.contiguous()
-            y = torch.empty((B, T, C), device=w.device, memory_format=torch.contiguous_format, dtype=torch.bfloat16)
-            wkv_cuda.forward(B, T, C, w, u, k, v, y)
-            ctx.save_for_backward(w, u, k, v, y)
-            return y
-        @staticmethod
-        def backward(ctx, gy):
-            B = ctx.B
-            T = ctx.T
-            C = ctx.C
-            assert T <= T_MAX
-            assert B * C % min(C, 32) == 0
-            w, u, k, v, y = ctx.saved_tensors
-            if os.environ.get("WN_ZERO_GRAD_FIX"):
-                gw = torch.zeros((B, C), device=gy.device, dtype=torch.bfloat16)
-                gu = torch.zeros((B, C), device=gy.device, dtype=torch.bfloat16)
-                gk = torch.zeros((B, T, C), device=gy.device, dtype=torch.bfloat16)
-                gv = torch.zeros((B, T, C), device=gy.device, dtype=torch.bfloat16)
-            else:
+    if os.environ.get("RWKV_STATE"):
+        wkv_cuda_with_state = load(name=f"wkv_{T_MAX}_bf16", sources=["cuda/wkv_op_state_bf16.cpp", "cuda/wkv_cuda_state_bf16.cu"], verbose=True, extra_cuda_cflags=["-t 4", "-std=c++17", "-res-usage", "--maxrregcount 60", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization", f"-DTmax={T_MAX}"])
+        class WKV_STATE(torch.autograd.Function):
+            @staticmethod
+            def init_state(B, C):
+                state = torch.zeros((B, C, 3), device='cuda')
+                state[:,:,2] = -1e38
+                return state.cuda()
+            @staticmethod
+            def forward(ctx, B, T, C, w, u, k, v,last_state):
+                ctx.B = B
+                ctx.T = T
+                ctx.C = C
+                assert T <= T_MAX
+                assert B * C % min(C, 32) == 0
+                w = -torch.exp(w.float().contiguous())
+                u = u.contiguous()
+                k = k.contiguous()
+                v = v.contiguous()
+                last_state = last_state.contiguous()
+                y = torch.empty((B, T, C), device=w.device, memory_format=torch.contiguous_format, dtype=torch.bfloat16)
+                new_state = torch.empty((B, C, 3), device=w.device, memory_format=torch.contiguous_format,dtype=torch.float32)
+                wkv_cuda_with_state.forward(B, T, C, w, u, k, v, last_state, y,new_state)
+                ctx.save_for_backward(w, u, k, v, y,last_state)
+                return y,new_state
+
+            @staticmethod
+            def backward(ctx, gy,gnew_state):
+                B = ctx.B
+                T = ctx.T
+                C = ctx.C
+                assert T <= T_MAX
+                assert B * C % min(C, 32) == 0
+                w, u, k, v, y, last_state = ctx.saved_tensors
                 gw = torch.empty((B, C), device=gy.device, memory_format=torch.contiguous_format, dtype=torch.bfloat16)
                 gu = torch.empty((B, C), device=gy.device, memory_format=torch.contiguous_format, dtype=torch.bfloat16)
                 gk = torch.empty((B, T, C), device=gy.device, memory_format=torch.contiguous_format, dtype=torch.bfloat16)
                 gv = torch.empty((B, T, C), device=gy.device, memory_format=torch.contiguous_format, dtype=torch.bfloat16)
-            if os.environ.get("DEBUG_WKV"):
-                torch.cuda.set_sync_debug_mode(1)
-                for name,check in [("gw",gw),("gu",gu),("gk",gk),("gv",gv),("gy",gy)]:
-                    if check.isnan().any():
-                        print(f"Find NaN in {name} before backward")
-                        print(check)
-                        pdb.set_trace()
-                pdb.set_trace()
-            wkv_cuda.backward(B, T, C, w, u, k, v, y, gy.contiguous(), gw, gu, gk, gv)
-            if os.environ.get("DEBUG_WKV"):
-                torch.cuda.synchronize()
-                for name,check in [("gw",gw),("gu",gu),("gk",gk),("gv",gv),("gy",gy)]:
-                    if check.isnan().any():
-                        print(f"Find NaN in {name}")
-                        print(check)
-                        pdb.set_trace()
-                pdb.set_trace()
-                torch.cuda.set_sync_debug_mode(0)
-            gw = torch.sum(gw, dim=0)
-            gu = torch.sum(gu, dim=0)
-            return (None, None, None, gw, gu, gk, gv)
+                glast_state = torch.empty((B, C, 3), device=w.device, memory_format=torch.contiguous_format,dtype=torch.float32)
+                wkv_cuda_with_state.backward(B, T, C, w, u, k, v, last_state, y, gy.contiguous(), gnew_state.contiguous(), gw, gu, gk, gv, glast_state)
+                gw = torch.sum(gw, dim=0)
+                gu = torch.sum(gu, dim=0)
+                return (None, None, None, gw, gu, gk, gv, glast_state)
+    else:
+        wkv_cuda = load(name=f"wkv_{T_MAX}_bf16", sources=["cuda/wkv_op_bf16.cpp", "cuda/wkv_cuda_bf16.cu"], verbose=True, extra_cuda_cflags=["-t 4", "-std=c++17", "-res-usage", "--maxrregcount 60", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization", f"-DTmax={T_MAX}"])
+        class WKV(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, B, T, C, w, u, k, v):
+                ctx.B = B
+                ctx.T = T
+                ctx.C = C
+                assert T <= T_MAX
+                assert B * C % min(C, 32) == 0
+                w = -torch.exp(w.float().contiguous())
+                u = u.contiguous()
+                k = k.contiguous()
+                v = v.contiguous()
+                y = torch.empty((B, T, C), device=w.device, memory_format=torch.contiguous_format, dtype=torch.bfloat16)
+                wkv_cuda.forward(B, T, C, w, u, k, v, y)
+                ctx.save_for_backward(w, u, k, v, y)
+                return y
+            @staticmethod
+            def backward(ctx, gy):
+                B = ctx.B
+                T = ctx.T
+                C = ctx.C
+                assert T <= T_MAX
+                assert B * C % min(C, 32) == 0
+                w, u, k, v, y = ctx.saved_tensors
+                if os.environ.get("WN_ZERO_GRAD_FIX"):
+                    gw = torch.zeros((B, C), device=gy.device, dtype=torch.bfloat16)
+                    gu = torch.zeros((B, C), device=gy.device, dtype=torch.bfloat16)
+                    gk = torch.zeros((B, T, C), device=gy.device, dtype=torch.bfloat16)
+                    gv = torch.zeros((B, T, C), device=gy.device, dtype=torch.bfloat16)
+                else:
+                    gw = torch.empty((B, C), device=gy.device, memory_format=torch.contiguous_format, dtype=torch.bfloat16)
+                    gu = torch.empty((B, C), device=gy.device, memory_format=torch.contiguous_format, dtype=torch.bfloat16)
+                    gk = torch.empty((B, T, C), device=gy.device, memory_format=torch.contiguous_format, dtype=torch.bfloat16)
+                    gv = torch.empty((B, T, C), device=gy.device, memory_format=torch.contiguous_format, dtype=torch.bfloat16)
+                if os.environ.get("DEBUG_WKV"):
+                    torch.cuda.set_sync_debug_mode(1)
+                    for name,check in [("gw",gw),("gu",gu),("gk",gk),("gv",gv),("gy",gy)]:
+                        if check.isnan().any():
+                            print(f"Find NaN in {name} before backward")
+                            print(check)
+                            pdb.set_trace()
+                    pdb.set_trace()
+                wkv_cuda.backward(B, T, C, w, u, k, v, y, gy.contiguous(), gw, gu, gk, gv)
+                if os.environ.get("DEBUG_WKV"):
+                    torch.cuda.synchronize()
+                    for name,check in [("gw",gw),("gu",gu),("gk",gk),("gv",gv),("gy",gy)]:
+                        if check.isnan().any():
+                            print(f"Find NaN in {name}")
+                            print(check)
+                            pdb.set_trace()
+                    pdb.set_trace()
+                    torch.cuda.set_sync_debug_mode(0)
+                gw = torch.sum(gw, dim=0)
+                gu = torch.sum(gu, dim=0)
+                return (None, None, None, gw, gu, gk, gv)
 else:
     wkv_cuda = load(name=f"wkv_{T_MAX}", sources=["cuda/wkv_op.cpp", "cuda/wkv_cuda.cu"], verbose=True, extra_cuda_cflags=["-res-usage", "--maxrregcount 60", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization", f"-DTmax={T_MAX}"])
     class WKV(torch.autograd.Function):
@@ -174,9 +209,22 @@ else:
             elif os.environ["RWKV_FLOAT_MODE"] == "bf16":
                 return (None, None, None, gw.bfloat16(), gu.bfloat16(), gk.bfloat16(), gv.bfloat16())
 
-
-def RUN_CUDA(B, T, C, w, u, k, v):
-    return WKV.apply(B, T, C, w, u, k, v)
+if os.environ.get("RWKV_PARTS"): #内部切分片段，不暴露state接口。
+    # num_parts = int(os.environ['RWKV_PARTS'])
+    def RUN_CUDA(B,T,C,w,u,k,v):
+        # assert(T%num_parts == 0)
+        parts = math.ceil(T/T_MAX)
+        # t = (T+num_parts-1)//num_parts #向上取整，保证T中每个片段都被选取
+        # assert(t<=T_MAX)
+        y_list = []
+        state = WKV_STATE.init_state(B, C)
+        for i in range(parts):
+            y, state = WKV_STATE.apply(B, k[:,T_MAX*i:T_MAX*(i+1),:].size(1), C, w, u, k[:,T_MAX*i:T_MAX*(i+1),:], v[:,T_MAX*i:T_MAX*(i+1),:], state)
+            y_list.append(y)
+        return torch.cat(y_list, dim=1)
+else:
+    def RUN_CUDA(B, T, C, w, u, k, v):
+        return WKV.apply(B, T, C, w, u, k, v)
 
 
 ########################################################################################################
@@ -607,7 +655,6 @@ class RWKV(pl.LightningModule):
                         x = deepspeed.checkpointing.checkpoint(block, x)
                 else:
                     x = block(x)
-
         x = self.ln_out(x)
 
         if args.head_qk > 0:
@@ -649,7 +696,9 @@ class RWKV(pl.LightningModule):
             else:
                 loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), reduction='none')
                 # loss_raw = loss
-                loss = torch.sum(loss * mask) / sum_mask
+                loss = torch.sum(loss * mask) 
+                if sum_mask > 0:
+                    loss = loss/sum_mask
 
                 # torch.set_printoptions(threshold=10000)
                 # if True: #self.global_rank == 1:
@@ -666,9 +715,13 @@ class RWKV(pl.LightningModule):
         return L2Wrap.apply(loss, logits)
 
     def training_step_end(self, batch_parts):
-        all = self.all_gather(batch_parts)
+        all_loss = self.all_gather(batch_parts)
         if self.trainer.is_global_zero:
-            self.trainer.my_loss_all = all
+            # self.trainer.my_loss_all = all
+            with torch.no_grad():
+                self.trainer.my_backward_step += 1
+                self.trainer.my_loss += all_loss.float().mean().item()/self.trainer.accumulate_grad_batches
+            # print(self.trainer.my_backward_step,self.trainer.my_loss)
 
     def generate_init_weight(self):
         print(
