@@ -21,7 +21,6 @@ from abc import ABC
 from abc import abstractmethod
 
 from tokenizers import Tokenizer
-from .rwkv_tokenizer import RWKV_TOKENIZER, TRIE_TOKENIZER
 from transformers import GPT2Tokenizer, GPT2TokenizerFast
 import numpy as np
 import sentencepiece as spm
@@ -45,9 +44,6 @@ def build_tokenizer(args):
     elif args.tokenizer_type.lower() == "HFTokenizer".lower():
         assert args.vocab_file is not None
         tokenizer = HFTokenizer(args.vocab_file)
-    elif args.tokenizer_type.lower() == "RWKVTokenizer".lower():
-        assert args.vocab_file is not None
-        tokenizer = RWKVTokenizer(args.vocab_file)
     elif args.tokenizer_type.lower() == "HFGPT2Tokenizer".lower():
         if args.vocab_file is None:
             print(
@@ -232,9 +228,9 @@ class HFTokenizer(AbstractTokenizer):
         name = "HFTokenizer"
         super().__init__(name)
 
-        self.tokenizer = Tokenizer.from_file(vocab_file)   
+        self.tokenizer = Tokenizer.from_file(vocab_file)
         self.eod_id = self.tokenizer.token_to_id("<|endoftext|>")
-        self.pad_id = self.tokenizer.token_to_id("<|padding|>") 
+        self.pad_id = self.tokenizer.token_to_id("<|padding|>")
 
     @property
     def vocab_size(self):
@@ -261,41 +257,6 @@ class HFTokenizer(AbstractTokenizer):
     def eod(self):
         return self.eod_id
 
-class RWKVTokenizer(AbstractTokenizer):
-    """RWKV Worlds Tokenizer."""
-
-    def __init__(self, vocab_file='rwkv_vocab_v20230424.txt'):
-        name = "RWKVTokenizer"
-        super().__init__(name)
-
-        self.tokenizer = RWKV_TOKENIZER(vocab_file)
-        self.eod_id = 0  # self.tokenizer.token_to_id("<|endoftext|>")
-        # self.pad_id = self.tokenizer.token_to_id("<|padding|>")
-
-    @property
-    def vocab_size(self):
-        return self.tokenizer.get_vocab_size()
-
-    @property
-    def vocab(self):
-        return self.tokenizer.get_vocab()
-
-    @property
-    def inv_vocab(self):
-        return self.tokenizer.decode
-
-    def tokenize(self, text: str):
-        return self.tokenizer.encode(text)
-
-    def tokenize_batch(self, text_batch: Union[List[str], str]):
-        return self.tokenizer.encode_batch(text_batch)
-
-    def detokenize(self, token_ids):
-        return self.tokenizer.decode(token_ids)
-
-    @property
-    def eod(self):
-        return self.eod_id
 
 class HFGPT2Tokenizer(AbstractTokenizer):
     """Designed to Integrate the pretrained OpenAI GPT2 Tokenizers from HF"""
@@ -439,5 +400,3 @@ class TiktokenTokenizer(AbstractTokenizer):
     @property
     def pad(self):
         raise NotImplementedError
-
-        

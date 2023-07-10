@@ -11,6 +11,7 @@ from .binidx import MMapIndexedDataset
 from .utils import MaybeIsPrime
 
 TOKEN_NEWLINE = 187
+#TOKEN_NEWLINE = 11
 
 class MyDataset(Dataset):
     def __init__(self, args):
@@ -30,7 +31,8 @@ class MyDataset(Dataset):
                 exit(0)
             else:
                 self.data = MMapIndexedDataset(args.data_file)
-                self.data_size = len(self.data._bin_buffer) // 2
+                #self.data_size = len(self.data._bin_buffer) // 2
+                self.data_size = len(self.data._bin_buffer) // self.data._index._dtype_size
                 rank_zero_info(f"Data has {self.data_size} tokens.")
 
             # if args.extra_data_file:
