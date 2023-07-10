@@ -398,7 +398,7 @@ if __name__ == "__main__":
     if os.path.isfile(args.lora_load):
         model.load_state_dict(torch.load(args.lora_load, map_location="cpu"),
                               strict=False)
-    if args.accelerator=="gpu" and args.precision == 'bf16' and args.devices==1: #WARNING: 可能不适合模型并行
+    if args.accelerator=="gpu" and args.precision == 'bf16' and int(args.devices)==1: #WARNING: 可能不适合模型并行
         model.to(device="cuda",dtype=torch.bfloat16)
     if args.accumulate_grad_batches_dict:
         import ast
