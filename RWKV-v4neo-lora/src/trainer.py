@@ -91,7 +91,7 @@ class train_callback(pl.Callback):
         args = self.args
         if trainer.is_global_zero:  # logging
             t_now = time.time_ns()
-            token_per_step = batch[0].size(0) * batch[0].size(1)
+            token_per_step = batch[0].size(0) * batch[0].size(1) * args.devices
             real_step = trainer.global_step + args.previous_step #+ args.epoch_begin * args.epoch_steps
             kt_s = 0
             try:
