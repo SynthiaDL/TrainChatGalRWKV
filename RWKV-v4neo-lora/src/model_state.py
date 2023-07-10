@@ -348,7 +348,7 @@ class RWKV_TimeMix(MyModule):
         B, T, C = x.size()  # x = (Batch,Time,Channel)
 
         # Mix x with the previous timestep to produce xk, xv, xr
-        xx = torch.concat((last_state.token_shift_state.unsqueeze(1), x[:, :-1]), dim=1)
+        xx = torch.concat((last_state.shift_state.unsqueeze(1), x[:, :-1]), dim=1)
         xk = x * self.time_mix_k + xx * (1 - self.time_mix_k)
         xv = x * self.time_mix_v + xx * (1 - self.time_mix_v)
         xr = x * self.time_mix_r + xx * (1 - self.time_mix_r)
@@ -444,7 +444,7 @@ class RWKV_ChannelMix(MyModule):
 
     @MyFunction
     def forward(self, x, last_state: ChannelMixState):
-        xx = torch.concat((last_state.token_shift_state.unsqueeze(1), x[:, :-1]), dim=1)
+        xx = torch.concat((last_state.shift_state.unsqueeze(1), x[:, :-1]), dim=1)
         xk = x * self.time_mix_k + xx * (1 - self.time_mix_k)
         xr = x * self.time_mix_r + xx * (1 - self.time_mix_r)
         k = self.key(xk)
@@ -656,14 +656,14 @@ class RWKV(pl.LightningModule):
         assert T <= T_MAX, "Cannot forward, model ctx_len is exhausted."
 
         x = self.emb(idx)
-        new_states = BlockStateList.empty(self.n_layer, B, self.n_embd,
+        new_states = BlockStateList.empty(args.n_layer, B, args.n_embd,
             x.device, x.dtype)
         for i,(block,block_state) in enumerate(zip(self.blocks,
             BlockStateList(last_shift_states, last_wkv_states))):
             # x = x.to(block.device)
             if args.grad_cp == 1 and i>0 : #and i < len(self.blocks)-1 
                 if args.lora:
-                    x, new_block_state = torch_checkpoint(block, x, block_state,use_reentrant=True) #use_reentrant=False或者不checkpoint第一层都可以使得梯度正常反传，要不然只反传一层
+                    x, new_block_state = torch_checkpoint(block, x, block_state,use_reentrant=False) #use_reentrant=False或者不checkpoint第一层都可以使得梯度正常反传，要不然只反传一层
                 else:
                     x, new_block_state = deepspeed.checkpointing.checkpoint(block, x, block_state)
             else:
@@ -674,7 +674,7 @@ class RWKV(pl.LightningModule):
         x = self.ln_out(x)
         
         x = self.head(x)
-        return x,new_states
+        return x,new_states.shift_states, new_states.wkv_states
     
     def training_step(self, batch, batch_idx):
         args = self.args
@@ -683,7 +683,7 @@ class RWKV(pl.LightningModule):
         B, T = idx.shape
         C = args.n_embd
 
-        states = BlockStateList.create(self.n_layer, B, C, idx.device,
+        states = BlockStateList.create(args.n_layer, B, C, idx.device,
             self.emb.weight.dtype)
 
         def checkpointed_step(idx, targets, prev_loss, last_shift_states,

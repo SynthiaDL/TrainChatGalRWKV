@@ -32,7 +32,7 @@ cd RWKV-v4neo-lora/
   #姑且就这样吧，用最基础的deepspeed策略
 
 
-python train.py \
+RWKV_VOCAB=WORLD python train.py \
   --load_model /root/autodl-tmp/world/RWKV-4-World-7B-v1-OnlyForTest_64%_trained-20230610-ctx4096.pth  \
   --proj_dir out7b_lora-world-64-full --wandb chatgal7blora\
   --data_file ../data/chatgal_text_document \

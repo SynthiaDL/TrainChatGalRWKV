@@ -132,12 +132,12 @@ if __name__ == "__main__":
 
 
     if args.my_script_mask:
-        cut_extra, mask_prefix_lines = args.my_script_mask.split("_")
+        cut_extra, mask_prefix_tokens = args.my_script_mask.split("_")
         cut_extra = cut_extra == '1'
-        mask_prefix_lines = int(mask_prefix_lines)
+        mask_prefix_tokens = int(mask_prefix_tokens)
         args.my_script_mask = {
             "cut_extra":cut_extra,
-            "mask_prefix_lines":mask_prefix_lines
+            "mask_prefix_tokens":mask_prefix_tokens
         }
     ########################################################################################################
 

@@ -11,18 +11,35 @@ from .binidx import MMapIndexedDataset
 from .utils import MaybeIsPrime
 
 from transformers import PreTrainedTokenizerFast
+from src.rwkv_tokenizer import TRIE_TOKENIZER
 
-TOKEN_NEWLINE = 187
-# DOUBLE_NEWLINE = torch.tensor([187,187])
-DOUBLE_NEWLINE = [187,187]
-ALICE_RESPONSE_PREFIX = torch.tensor([187,187,2422,547,27])
+if os.environ.get("RWKV_VOCAB") == '20B':
+    TOKEN_NEWLINE = 187
+    # DOUBLE_NEWLINE = torch.tensor([187,187])
+    # DOUBLE_NEWLINE = [187,187]
+    # ALICE_RESPONSE_PREFIX = torch.tensor([187,187,2422,547,27])
+    class WrappedTokenizer():
+        def __init__(self,tokenizer_file="../20B_tokenizer") -> None:
+            self.tokenizer = PreTrainedTokenizerFast(tokenizer_file=tokenizer_file)
+        def encode(self,src,return_offsets_mapping=False):
+            tokenized = self.tokenizer(src,return_offsets_mapping=return_offsets_mapping)
+            if return_offsets_mapping:
+                return tokenized.input_ids, tokenized.offset_mapping
+            else:
+                return tokenized.input_ids
+else:
+    TOKEN_NEWLINE = 11
+    class WrappedTokenizer():
+        def __init__(self,tokenizer_file="../rwkv_vocab_v20230424.txt") -> None:
+            self.tokenizer = TRIE_TOKENIZER(tokenizer_file)
+        def encode(self,src,return_offsets_mapping=False):
+            return self.tokenizer.encode(src,return_offsets=return_offsets_mapping)
 
 INSTRUCT_PROMPTS = [
     "{{{user}正在和{bot}交流，{bot}非常聪明，正在帮助{user}解决问题}}",
     "{{{bot}是一个知识渊博的专家，正在和{user}交谈。}}",
     "{{{bot}懂得数学、物理等各种学科，经常帮助{user}}}",
 ]
-
 class MyDataset(Dataset):
     def __init__(self, args):
         self.args = args
@@ -46,7 +63,7 @@ class MyDataset(Dataset):
                 exit(0)
             else:
                 self.data = MMapIndexedDataset(args.data_file)
-                self.data_size = len(self.data._bin_buffer) // self.data._index._dtype_siz
+                self.data_size = len(self.data._bin_buffer) // self.data._index._dtype_size
                 rank_zero_info(f"Data has {self.data_size} tokens.")
 
             if args.instruct_data_file:
@@ -66,12 +83,12 @@ class MyDataset(Dataset):
                     with open(args.names_data_file) as f:
                         self.names_data = json.load(f)
                         self.max_replace = 10
-                self.tokenizer = PreTrainedTokenizerFast(tokenizer_file="./20B_tokenizer.json")
+                self.tokenizer = WrappedTokenizer()
                 
 
             if args.my_qa_mask > 0:
                 self.data_pile = MMapIndexedDataset('/fsx/BlinkDL/pile/pile_20B_tokenizer_text_document')
-                self.data_pile_size = len(self.data_pile._bin_buffer) // 2
+                self.data_pile_size = len(self.data_pile._bin_buffer) // self.data_pile._index._dtype_size
 
             if args.my_pile_stage > 0:
                 # assert self.data_size == 332115325534 and self.vocab_size == 50277
@@ -153,15 +170,15 @@ class MyDataset(Dataset):
 
     def mask_except_for_name(self,text,name):
         name_spans = self.find_someone_dialogue_span(text,name)
-        tokenized = self.tokenizer(text,return_offsets_mapping=True)
-        dix = tokenized.input_ids
+        input_ids,offset_mapping = self.tokenizer.encode(text,return_offsets_mapping=True)
+        dix = input_ids
         # x = dix[:-1]
         # y = dix[1:]
         # z = [1] * len(x)
         dix_with_mask = dix.copy()
         if name_spans:
             span_start,span_end = name_spans.pop(0)
-            for i,(start,end) in enumerate(tokenized.offset_mapping):
+            for i,(start,end) in enumerate(offset_mapping):
                 if end <= span_start or start>=span_end:
                     dix_with_mask[i] = -100
                     # z[i] = 0
@@ -201,7 +218,7 @@ class MyDataset(Dataset):
                 replaced_count = 0
                 names = self.sample_name_pair()
                 while len(dix_concat)<=ctx_len:
-                    seq = random.choice(self.instruct_data)
+                    seq = random.choice(self.instruct_data).rstrip('\n')+'\n\n'
                     if replaced_count == 0:
                         seq = random.choice(INSTRUCT_PROMPTS).format(user=names[0],bot=names[1])+"\n\n" + seq
                     (seq,num_replaced) = re.subn(r"(^|\n)Bob: ",r"\1"+names[0]+": ",seq) 
@@ -212,11 +229,11 @@ class MyDataset(Dataset):
                     if replaced_count >= self.max_replace:
                         replaced_count = 0
                         names = self.sample_name_pair()
-                    dix += DOUBLE_NEWLINE
-                    if dix_with_mask[-1] == -100:
-                        dix_with_mask += [-100,-100]
-                    else:
-                        dix_with_mask += DOUBLE_NEWLINE
+                    # dix += DOUBLE_NEWLINE
+                    # if dix_with_mask[-1] == -100:
+                    #     dix_with_mask += [-100,-100]
+                    # else:
+                    #     dix_with_mask += DOUBLE_NEWLINE
 
                     
                     # dix = self.tokenizer(seq).input_ids
@@ -349,6 +366,7 @@ class MyDataset(Dataset):
                     if args.my_script_align == 1:
                         #实现功能：对齐脚本，保证开头是说话人或者旁白描述（即刚刚经历过双重换行）
                         #做法是在dix里找到第一处双重换行，然后重新从此处构造dix
+                        raise NotImplementedError("因不支持world,脚本对齐已废弃")
                         count_newline = 0
                         j = 0
                         while True:
@@ -417,6 +435,7 @@ class MyDataset(Dataset):
                             z[real_length:] = 0
                         prefix_max_len = min(prefix_max_len,real_length)
                     if args.my_script_mask.get('mask_prefix_lines'):
+                        raise NotImplementedError("因不支持World，mask前缀行已废弃")
                         mask_prefix_lines = args.my_script_mask['mask_prefix_lines']
                         newline_counter = 0
                         for j in range(prefix_max_len):
@@ -426,6 +445,8 @@ class MyDataset(Dataset):
                                 break
                         if newline_counter == mask_prefix_lines:
                             z[:j]=0
+                    elif args.my_script_mask.get("mask_prefix_tokens"):
+                        z[:args.my_script_mask['mask_prefix_tokens']] = 0
                 x = torch.tensor(dix[:-1], dtype=torch.long)
                 y = torch.tensor(dix[1:], dtype=torch.long)
 
