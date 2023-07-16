@@ -44,3 +44,18 @@ RWKV_VOCAB=WORLD python train.py \
   --precision bf16 --grad_cp 1 --accumulate_grad_batches 1 --strategy deepspeed_stage_2_offload \
   --lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.01 \
   --lora_parts=ffn
+
+#长上下文训练
+RWKV_VOCAB=WORLD python train.py \
+  --load_model /root/autodl-tmp/world/RWKV-4-World-7B-v1-OnlyForTest_64%_trained-20230610-ctx4096.pth  \
+  --proj_dir out7b_lora-world-64-full --wandb chatgal7blora\
+  --data_file ../data/chatgal_text_document \
+  --data_type binidx \
+  --vocab_size 65536 --epoch_steps 1000 --epoch_count 20 \
+  --epoch_begin 0 --epoch_save 1 --micro_bsz 1 --n_layer 32 --n_embd 4096 \
+  --pre_ffn 0 --head_qk 0 --lr_init 1e-4 --lr_final 1e-5 --warmup_steps 1000 \
+  --beta1 0.9 --beta2 0.999 --adam_eps 1e-8 --accelerator gpu --devices 1 \
+  --precision bf16 --grad_cp 1 --accumulate_grad_batches 1 --strategy deepspeed_stage_2 \
+  --lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.01 \
+  --lora_parts=ffn\
+  --initial_ctx_len 4096 --ctx_len 32768 --ctx_parts 32 --ctx_warmup_steps 100

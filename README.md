@@ -42,4 +42,8 @@ license: wtfpl
 - devices：设置使用的设备数量。
 - precision：设置计算精度（例如 bfloat16）。
 - strategy：设置训练策略（例如 deepspeed_stage_2_offload）。
-- grad_cp：梯度检查点标志。
+- grad_cp：层梯度检查点标志。
+- state_cp: 状态梯度检查点标志。开启后，将会大幅减少长上下文的显存占用。
+- initial_ctx_len: 初始训练上下文长度。配合ctx_warmup_steps使用
+- ctx_warmup_steps: 上下文warmup步数，训练过程中会逐渐从initial_ctx_len涨到ctx_len
+- ctx_parts: 上下文切片数量。训练过程中会使用ctx_len/ctx_parts长度的WKV算子。例如ctx_len=8192,ctx_parts=8，则会使用1024长度的WKV算子。WKV算子的长度越短，占用显存越小，但是可能需要更多的计算时间。
