@@ -157,10 +157,10 @@ if os.environ["RWKV_FLOAT_MODE"] == "bf16":
             return (None, None, None, gw, gu, gk, gv, glast_state)
 
 else:
-    wkv_cuda = load(name=f"wkv_{T_MAX}", sources=["cuda/wkv_op.cpp", "cuda/wkv_cuda.cu"], verbose=True, extra_cuda_cflags=["-res-usage", "--maxrregcount 60", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization", f"-DTmax={T_MAX}"])
+    wkv_cuda = load(name=f"wkv_{T_MAX}", sources=["cuda/wkv_op_state.cpp", "cuda/wkv_cuda_state.cu"], verbose=True, extra_cuda_cflags=["-res-usage", "--maxrregcount 60", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization", f"-DTmax={T_MAX}"])
     class WKV(torch.autograd.Function):
         @staticmethod
-        def forward(ctx, B, T, C, w, u, k, v):
+        def forward(ctx, B, T, C, w, u, k, v,last_state):
             ctx.B = B
             ctx.T = T
             ctx.C = C
@@ -176,39 +176,42 @@ else:
                 u = u.float().contiguous()
                 k = k.float().contiguous()
                 v = v.float().contiguous()
+            last_state = last_state.contiguous()
             y = torch.empty((B, T, C), device=w.device, memory_format=torch.contiguous_format)
-            wkv_cuda.forward(B, T, C, w, u, k, v, y)
-            ctx.save_for_backward(w, u, k, v, y)
+            new_state = torch.empty((B, C, 3), device=w.device, memory_format=torch.contiguous_format,dtype=torch.float32)
+            wkv_cuda.forward(B, T, C, w, u, k, v, last_state, y,new_state)
+            ctx.save_for_backward(w, u, k, v, y,last_state)
             if "32" in os.environ["RWKV_FLOAT_MODE"]:
-                return y
+                return y,new_state
             elif os.environ["RWKV_FLOAT_MODE"] == "fp16":
-                return y.half()
+                return y.half(),new_state
             elif os.environ["RWKV_FLOAT_MODE"] == "bf16":
-                return y.bfloat16()
+                return y.bfloat16(),new_state
         @staticmethod
-        def backward(ctx, gy):
+        def backward(ctx, gy,gnew_state):
             B = ctx.B
             T = ctx.T
             C = ctx.C
             assert T <= T_MAX
             assert B * C % min(C, 32) == 0
-            w, u, k, v, y = ctx.saved_tensors
+            w, u, k, v, y, last_state = ctx.saved_tensors
             gw = torch.empty((B, C), device=gy.device, memory_format=torch.contiguous_format)
             gu = torch.empty((B, C), device=gy.device, memory_format=torch.contiguous_format)
             gk = torch.empty((B, T, C), device=gy.device, memory_format=torch.contiguous_format)
             gv = torch.empty((B, T, C), device=gy.device, memory_format=torch.contiguous_format)
+            glast_state = torch.empty((B, C, 3), device=w.device, memory_format=torch.contiguous_format,dtype=torch.float32)
             if "32" in os.environ["RWKV_FLOAT_MODE"]:
-                wkv_cuda.backward(B, T, C, w, u, k, v, y, gy.contiguous(), gw, gu, gk, gv)
+                wkv_cuda.backward(B, T, C, w, u, k, v, y, gy.contiguous(), gnew_state.contiguous(), gw, gu, gk, gv, glast_state)
             else:
-                wkv_cuda.backward(B, T, C, w, u, k, v, y, gy.float().contiguous(), gw, gu, gk, gv)
+                wkv_cuda.backward(B, T, C, w, u, k, v, y, gy.float().contiguous(), gnew_state.contiguous(), gw, gu, gk, gv, glast_state)
             gw = torch.sum(gw, dim=0)
             gu = torch.sum(gu, dim=0)
             if "32" in os.environ["RWKV_FLOAT_MODE"]:
-                return (None, None, None, gw, gu, gk, gv)
+                return (None, None, None, gw, gu, gk, gv, glast_state)
             elif os.environ["RWKV_FLOAT_MODE"] == "fp16":
-                return (None, None, None, gw.half(), gu.half(), gk.half(), gv.half())
+                return (None, None, None, gw.half(), gu.half(), gk.half(), gv.half(), glast_state)
             elif os.environ["RWKV_FLOAT_MODE"] == "bf16":
-                return (None, None, None, gw.bfloat16(), gu.bfloat16(), gk.bfloat16(), gv.bfloat16())
+                return (None, None, None, gw.bfloat16(), gu.bfloat16(), gk.bfloat16(), gv.bfloat16(), glast_state)
 
 # if os.environ.get("RWKV_PARTS"): #内部切分片段，不暴露state接口。
 #     num_parts = int(os.environ['RWKV_PARTS'])
@@ -685,7 +688,9 @@ class RWKV(pl.LightningModule):
 
         states = BlockStateList.create(args.n_layer, B, C, idx.device,
             self.emb.weight.dtype)
-
+        # init_states = states
+        # init_states.shift_states.requires_grad_()
+        # init_states.wkv_states.requires_grad_()
         def checkpointed_step(idx, targets, prev_loss, last_shift_states,
                               last_wkv_states, prev_token_amount):
             logits, new_shift_states, new_wkv_states = self(idx, last_shift_states, last_wkv_states)

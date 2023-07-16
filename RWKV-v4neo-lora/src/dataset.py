@@ -21,8 +21,8 @@ if os.environ.get("RWKV_VOCAB") == '20B':
     class WrappedTokenizer():
         def __init__(self,tokenizer_file="../20B_tokenizer") -> None:
             self.tokenizer = PreTrainedTokenizerFast(tokenizer_file=tokenizer_file)
-        def encode(self,src,return_offsets_mapping=False):
-            tokenized = self.tokenizer(src,return_offsets_mapping=return_offsets_mapping)
+        def encode(self,src,return_offsets_mapping=False,max_length=None):
+            tokenized = self.tokenizer(src,return_offsets_mapping=return_offsets_mapping,max_length=max_length,truncation=max_length is not None)
             if return_offsets_mapping:
                 return tokenized.input_ids, tokenized.offset_mapping
             else:
@@ -32,13 +32,13 @@ else:
     class WrappedTokenizer():
         def __init__(self,tokenizer_file="../rwkv_vocab_v20230424.txt") -> None:
             self.tokenizer = TRIE_TOKENIZER(tokenizer_file)
-        def encode(self,src,return_offsets_mapping=False):
-            return self.tokenizer.encode(src,return_offsets=return_offsets_mapping)
+        def encode(self,src,return_offsets_mapping=False,max_length=None):
+            return self.tokenizer.encode(src,return_offsets=return_offsets_mapping,max_length=max_length)
 
 INSTRUCT_PROMPTS = [
-    "{{{user}正在和{bot}交流，{bot}非常聪明，正在帮助{user}解决问题}}",
-    "{{{bot}是一个知识渊博的专家，正在和{user}交谈。}}",
-    "{{{bot}懂得数学、物理等各种学科，经常帮助{user}}}",
+    "> {user}正在和{bot}交流，{bot}非常聪明，正在帮助{user}解决问题。",
+    "> {bot}是一个知识渊博的专家，正在和{user}交谈。",
+    "> {bot}懂得数学、物理等各种学科，经常帮助{user}。",
 ]
 class MyDataset(Dataset):
     def __init__(self, args):
@@ -168,25 +168,27 @@ class MyDataset(Dataset):
         # pattern=r"(?:^|\n\n)(?P<name>\w+)\:(?P<content>.*?)(?=\n\n|$)"):
         return [m.span("content") for m in re.finditer(pattern,text,re.DOTALL)]
 
-    def mask_except_for_name(self,text,name):
-        name_spans = self.find_someone_dialogue_span(text,name)
-        input_ids,offset_mapping = self.tokenizer.encode(text,return_offsets_mapping=True)
+    def tokenize_dialogue(self,text,target_name=None,max_length=None):
+        input_ids,offset_mapping = self.tokenizer.encode(text,return_offsets_mapping=True,max_length=max_length)
         dix = input_ids
         # x = dix[:-1]
         # y = dix[1:]
         # z = [1] * len(x)
         dix_with_mask = dix.copy()
-        if name_spans:
-            span_start,span_end = name_spans.pop(0)
-            for i,(start,end) in enumerate(offset_mapping):
-                if end <= span_start or start>=span_end:
-                    dix_with_mask[i] = -100
-                    # z[i] = 0
-                if start>=span_end and name_spans:
-                    span_start,span_end = name_spans.pop(0)
-        else:
-            print("Cannot find name spans", name)
-            print(text)
+        if target_name:
+            name_spans = self.find_someone_dialogue_span(text,target_name)
+            if name_spans:
+                span_start,span_end = name_spans.pop(0)
+                for i,(start,end) in enumerate(offset_mapping):
+                    if end <= span_start or start>=span_end:
+                        dix_with_mask[i] = -100
+                        # z[i] = 0
+                    if start>=span_end and name_spans:
+                        span_start,span_end = name_spans.pop(0)
+            else:
+                print("Cannot find name spans", target_name)
+                print(text)
+                dix_with_mask = [-100] * len(dix)
         return dix,dix_with_mask
     def __len__(self):
         return self.args.epoch_steps * self.args.micro_bsz
@@ -221,11 +223,12 @@ class MyDataset(Dataset):
                     seq = random.choice(self.instruct_data).rstrip('\n')+'\n\n'
                     if replaced_count == 0:
                         seq = random.choice(INSTRUCT_PROMPTS).format(user=names[0],bot=names[1])+"\n\n" + seq
-                    (seq,num_replaced) = re.subn(r"(^|\n)Bob: ",r"\1"+names[0]+": ",seq) 
-                    (seq,num_replaced) = re.subn(r"(^|\n)Alice: ",r"\1"+names[1]+": ",seq) 
+                    (seq,num_replaced) = re.subn(r"(^|\n)Bob: ",r"\g<1>"+names[0]+": ",seq) 
+                    (seq,num_replaced) = re.subn(r"(^|\n)Alice: ",r"\g<1>"+names[1]+": ",seq) 
                     replaced_count += num_replaced
                     seq = seq.strip()
-                    dix,dix_with_mask = self.mask_except_for_name(seq,names[1])
+                    # dix,dix_with_mask = self.mask_except_for_name(seq,names[1])
+                    dix,dix_with_mask = self.tokenize_dialogue(seq,names[1])
                     if replaced_count >= self.max_replace:
                         replaced_count = 0
                         names = self.sample_name_pair()

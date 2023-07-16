@@ -69,10 +69,10 @@ class TRIE_TOKENIZER():
         for t, i in self.token2idx.items():
             _ = self.root.add(t, val=(t, i))
 
-    def encodeBytes(self, src:bytes):
+    def encodeBytes(self, src:bytes,max_length=None):
         idx:int = 0
         tokens = []
-        while (idx < len(src)):
+        while (idx < len(src) and (max_length is None or len(tokens)<max_length)):
             _idx:int = idx
             idx, _, values = self.root.find_longest(src, idx)
             assert(idx != _idx)
@@ -80,13 +80,13 @@ class TRIE_TOKENIZER():
             tokens.append(token)
         return tokens
     
-    def encodeStrWithOffset(self,src:str):
+    def encodeStrWithOffset(self,src:str,max_length=None):
         offset_mapping = get_utf8_bytes_offset(src)
         src = src.encode("utf-8")
         idx:int = 0
         tokens = []
         offsets = []
-        while (idx < len(src)):
+        while (idx < len(src) and (max_length is None or len(tokens)<max_length)):
             _idx:int = idx
             idx, _, values = self.root.find_longest(src, idx)
             assert(idx != _idx)
@@ -140,7 +140,7 @@ def get_utf8_bytes_offset(text):
     return byte_offset_mapping
 
 if __name__ == "__main__":
-    tokenizer = TRIE_TOKENIZER("../rwkv_vocab_v20230424.txt")
+    tokenizer = TRIE_TOKENIZER("../../rwkv_vocab_v20230424.txt")
     s = "嘉祥: 巧克力，你在吗？\n帮我买个Apple。\n\n巧克力: 我这就去！！！！\n\n"
     tokenizer.printTokens(tokenizer.encode(s))
     print(" ".join(f"{repr(s[o[0]:o[1]])}{t}" for t,o in zip(*tokenizer.encodeStrWithOffset(s))))
