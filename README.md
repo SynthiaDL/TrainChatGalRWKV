@@ -1,5 +1,5 @@
 ---
-license: wtfpl
+license: Apache 2.0
 ---
 
 ## 全参数微调步骤
