@@ -27,6 +27,8 @@ if os.environ.get("RWKV_VOCAB") == '20B':
                 return tokenized.input_ids, tokenized.offset_mapping
             else:
                 return tokenized.input_ids
+        def decode(self,ids):
+            return self.tokenizer.decode(ids)
 else:
     TOKEN_NEWLINE = 11
     class WrappedTokenizer():
@@ -34,22 +36,45 @@ else:
             self.tokenizer = TRIE_TOKENIZER(tokenizer_file)
         def encode(self,src,return_offsets_mapping=False,max_length=None):
             return self.tokenizer.encode(src,return_offsets=return_offsets_mapping,max_length=max_length)
-
+        def decode(self,ids):
+            return self.tokenizer.decode(ids)
 INSTRUCT_PROMPTS = [
     "> {user}正在和{bot}交流，{bot}非常聪明，正在帮助{user}解决问题。",
     "> {bot}是一个知识渊博的专家，正在和{user}交谈。",
     "> {bot}懂得数学、物理等各种学科，经常帮助{user}。",
 ]
 class MyDataset(Dataset):
-    def __init__(self, args):
+    def __init__(self, args, split='train',split_ratio=(0,1),sort=None): #sort= shuffle/short_first/long_first/None
         self.args = args
+        self.split = split
+        self.sample_strategy = "random"
         self.ctx_len = args.initial_ctx_len or args.ctx_len
         self.final_ctx_len = args.ctx_len
         self.warm_up_steps = max(args.ctx_warmup_steps*args.micro_bsz * (args.accumulate_grad_batches or 1),1)
         self.current_warmup_step = 0
         self.update_per_steps = args.micro_bsz * (args.accumulate_grad_batches or 1)
         
-        if args.data_type == "binidx":
+        if args.data_type == "jsonl":
+            self.sample_strategy = "over_all"
+            self.vocab_size = args.vocab_size
+            self.tokenizer = WrappedTokenizer()
+            self.data = []
+            with open(args.data_file) as f:
+                for line in f:
+                    d = json.loads(line)
+                    self.data.append(d['text'])
+                if split_ratio is not None:
+                    self.data = self.data[int(len(self.data)*split_ratio[0]):int(len(self.data)*split_ratio[1])]
+                if sort == 'shuffle':
+                    random.shuffle(self.data)
+                elif sort == 'short_first':
+                    self.data.sort(key=lambda x:len(x))
+                elif sort == 'long_first':
+                    self.data.sort(key=lambda x:len(x),reverse=True)
+                elif sort:
+                    raise NotImplementedError
+
+        elif args.data_type == "binidx":
             self.vocab_size = args.vocab_size
             rank_zero_info(f"Current vocab size = {self.vocab_size} (make sure it's correct)")
 
@@ -85,7 +110,6 @@ class MyDataset(Dataset):
                         self.max_replace = 10
                 self.tokenizer = WrappedTokenizer()
                 
-
             if args.my_qa_mask > 0:
                 self.data_pile = MMapIndexedDataset('/fsx/BlinkDL/pile/pile_20B_tokenizer_text_document')
                 self.data_pile_size = len(self.data_pile._bin_buffer) // self.data_pile._index._dtype_size
@@ -191,7 +215,11 @@ class MyDataset(Dataset):
                 dix_with_mask = [-100] * len(dix)
         return dix,dix_with_mask
     def __len__(self):
-        return self.args.epoch_steps * self.args.micro_bsz
+        if self.args.data_type=='jsonl':
+            return len(self.data) // int(self.args.devices) #HACK 硬编码
+        else:
+            return self.args.epoch_steps * self.args.micro_bsz
+        
 
     def __getitem__(self, idx):
         args = self.args
@@ -286,9 +314,17 @@ class MyDataset(Dataset):
             #     return x_concat[:ctx_len].contiguous(), y_concat[:ctx_len].contiguous(), z_concat[:ctx_len].contiguous()
 
                     
-                
+        if args.data_type == 'jsonl':
+            if self.sample_strategy == 'over_all':
+                seq = self.data[idx*world_size+rank]
+            else:
+                seq = random.choice(self.data)
+            dix,dix_with_mask = self.tokenize_dialogue(seq,args.select_name)
+            x = torch.tensor(dix[:-1],dtype=torch.long)
+            y = torch.tensor(dix_with_mask[1:],dtype=torch.long)
+            return x,y
 
-        if args.data_type == "wds_img":
+        elif args.data_type == "wds_img":
             def init_wds(self, bias=0):
                 def identity(x):
                     return x            

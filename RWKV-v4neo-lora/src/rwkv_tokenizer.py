@@ -96,13 +96,14 @@ class TRIE_TOKENIZER():
         return tokens,offsets
 
     def decodeBytes(self, tokens):
-        return b''.join(map(lambda i: self.idx2token[i], tokens))
+        # return b''.join(map(lambda i: self.idx2token[i], tokens))
+        return b''.join(self.idx2token[i] for i in tokens)
 
-    def encode(self, src,return_offsets=False):
+    def encode(self, src,return_offsets=False,max_length=None):
         if return_offsets:
-            return self.encodeStrWithOffset(src)
+            return self.encodeStrWithOffset(src,max_length=max_length)
         else:
-            return self.encodeBytes(src.encode("utf-8"))
+            return self.encodeBytes(src.encode("utf-8"),max_length=max_length)
 
     def decode(self, tokens):
         try:

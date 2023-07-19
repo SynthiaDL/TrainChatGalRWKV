@@ -55,7 +55,10 @@ if __name__ == "__main__":
     parser.add_argument("--random_seed", default="-1", type=int)
 
     parser.add_argument("--data_file", default="", type=str)
+    parser.add_argument("--train_split_ratio",default=None,type=float)
+    parser.add_argument("--train_data_sort",default=None,type=str,choices=['shuffle','short_first','long_first'])
     parser.add_argument("--data_type", default="utf-8", type=str)
+    parser.add_argument("--select_name", default=None, type=str)
     parser.add_argument("--vocab_size", default=0, type=int)  # vocab_size = 0 means auto (for char-level LM and .txt data)
 
     parser.add_argument("--ctx_len", default=1024, type=int)
@@ -93,6 +96,7 @@ if __name__ == "__main__":
     parser.add_argument("--my_pile_edecay", default=0, type=int)
     parser.add_argument("--layerwise_lr", default=1, type=int)  # layerwise lr for faster convergence (but slower it/s)
     parser.add_argument("--ds_bucket_mb", default=200, type=int)  # deepspeed bucket size in MB. 200 seems enough
+    parser.add_argument("--weight_decay",default=0, type=float)
     # parser.add_argument("--cuda_cleanup", default=0, type=int)  # extra cuda cleanup (sometimes helpful)
 
     parser.add_argument("--my_img_version", default=0, type=str)
@@ -310,8 +314,12 @@ if __name__ == "__main__":
 
     from src.trainer import train_callback, generate_init_weight,my_save
     from src.dataset import MyDataset
-
-    train_data = MyDataset(args)
+    if args.train_split_ratio and args.train_split_ratio<1:
+        train_data = MyDataset(args,split='train',split_ratio=(0,args.train_split_ratio),sort=args.train_data_sort)
+        dev_data = MyDataset(args,split='dev',split_ratio=(args.train_split_ratio,1))
+    else:
+        train_data = MyDataset(args,split='train')
+        dev_data = None
     args.vocab_size = train_data.vocab_size
 
     if args.data_type == 'wds_img':
@@ -400,6 +408,10 @@ if __name__ == "__main__":
                               strict=False)
     if args.accelerator=="gpu" and args.precision == 'bf16' and int(args.devices)==1: #WARNING: 可能不适合模型并行
         model.to(device="cuda",dtype=torch.bfloat16)
+    elif args.precision == 'bf16':
+        model.to(dtype=torch.bfloat16)
+    elif args.precision == 16:
+        model.to(dtype=torch.float16)
     if args.accumulate_grad_batches_dict:
         import ast
         args.accumulate_grad_batches = ast.literal_eval(args.accumulate_grad_batches_dict)
@@ -431,18 +443,35 @@ if __name__ == "__main__":
         trainer.strategy.config["zero_optimization"]["allgather_bucket_size"] = args.ds_bucket_mb * 1000 * 1000
         trainer.strategy.config["zero_optimization"]["reduce_bucket_size"] = args.ds_bucket_mb * 1000 * 1000
 
+    if args.data_type=='jsonl':
+        def padding_fn(samples):
+            max_len = max(len(sample[0])for sample in samples)
+            result_x = torch.zeros(len(samples),max_len,dtype=torch.long)
+            result_y = -100 * torch.ones(len(samples),max_len,dtype=torch.long)
+            for i,(x,y,*others) in enumerate(samples):
+                result_x[i][:len(x)] = x
+                result_y[i][:len(y)] = y
+            return result_x, result_y
+    else:
+        padding_fn=None
+            
+
     # must set shuffle=False, persistent_workers=False (because worker is in another thread)
-    data_loader = DataLoader(train_data, shuffle=False, pin_memory=True, batch_size=args.micro_bsz, num_workers=1, persistent_workers=False, drop_last=True)
+    data_loader = DataLoader(train_data, shuffle=False, pin_memory=True, batch_size=args.micro_bsz, num_workers=1, persistent_workers=False, drop_last=True,collate_fn=padding_fn)
+    if dev_data is not None:
+        dev_data_loader = DataLoader(train_data, shuffle=False, pin_memory=True, batch_size=args.micro_bsz, num_workers=1, persistent_workers=False, drop_last=True,collate_fn=padding_fn)
+    else:
+        dev_data_loader = None
     #debug
     if args.debug:
         from transformers import PreTrainedTokenizerFast
-        tokenizer = PreTrainedTokenizerFast(tokenizer_file='20B_tokenizer.json')
+        tokenizer = train_data.tokenizer
         train_data.global_rank = 0
         train_data.real_epoch = 0
         train_data.world_size = 1
         batch = next(iter(data_loader))
         print(batch)
-        print(tokenizer.batch_decode(batch[0]))
+        print([tokenizer.decode(seq) for seq in batch[0]])
         pdb.set_trace()
        
     
@@ -479,4 +508,5 @@ if __name__ == "__main__":
     atexit.register(leave_script,args)
 
     trainer.training_dataset = train_data
-    trainer.fit(model, data_loader)
+    trainer.dev_dataset = dev_data
+    trainer.fit(model, data_loader,dev_data_loader)

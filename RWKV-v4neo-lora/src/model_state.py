@@ -614,21 +614,22 @@ class RWKV(pl.LightningModule):
             # print('2x', lr_2x)
             # print('3x', lr_3x)
             param_dict = {n: p for n, p in self.named_parameters()}
+            no_decay = ['bias', 'LayerNorm.weight']
             if args.my_pile_stage == 2:
                 optim_groups = [
-                    {"params": [param_dict[n] for n in lr_1x], "weight_decay": 0.0, "my_lr_scale": 1.0},
-                    {"params": [param_dict[n] for n in lr_2x], "weight_decay": 0.0, "my_lr_scale": 5.0},# test: 2e-3 / args.lr_init},
-                    {"params": [param_dict[n] for n in lr_3x], "weight_decay": 0.0, "my_lr_scale": 5.0},# test: 3e-3 / args.lr_init},
+                    {"params": [param_dict[n] for n in lr_1x], "weight_decay": 0.0 if any(nd in n for nd in no_decay) else args.weight_decay, "my_lr_scale": 1.0},
+                    {"params": [param_dict[n] for n in lr_2x], "weight_decay": 0.0 if any(nd in n for nd in no_decay) else args.weight_decay, "my_lr_scale": 5.0},# test: 2e-3 / args.lr_init},
+                    {"params": [param_dict[n] for n in lr_3x], "weight_decay": 0.0 if any(nd in n for nd in no_decay) else args.weight_decay, "my_lr_scale": 5.0},# test: 3e-3 / args.lr_init},
                 ]
             else:
                 optim_groups = [
-                    {"params": [param_dict[n] for n in lr_1x], "weight_decay": 0.0, "my_lr_scale": 1.0},
-                    {"params": [param_dict[n] for n in lr_2x], "weight_decay": 0.0, "my_lr_scale": 2.0},
-                    {"params": [param_dict[n] for n in lr_3x], "weight_decay": 0.0, "my_lr_scale": 3.0},
+                    {"params": [param_dict[n] for n in lr_1x], "weight_decay": 0.0 if any(nd in n for nd in no_decay) else args.weight_decay, "my_lr_scale": 1.0},
+                    {"params": [param_dict[n] for n in lr_2x], "weight_decay": 0.0 if any(nd in n for nd in no_decay) else args.weight_decay, "my_lr_scale": 2.0},
+                    {"params": [param_dict[n] for n in lr_3x], "weight_decay": 0.0 if any(nd in n for nd in no_decay) else args.weight_decay, "my_lr_scale": 3.0},
                 ]
         else:
             optim_groups = [
-                {"params": [p for n, p in self.named_parameters()], "weight_decay": 0.0},
+                {"params": [p for n, p in self.named_parameters()], "weight_decay": 0.0 if any(nd in n for nd in no_decay) else args.weight_decay},
             ]
 
         for g in optim_groups:
@@ -636,12 +637,12 @@ class RWKV(pl.LightningModule):
         optim_groups = [g for g in optim_groups if len(g["params"]) > 0]
 
         if self.deepspeed_offload:
-            return DeepSpeedCPUAdam(optim_groups, lr=self.args.lr_init, betas=self.args.betas, eps=self.args.adam_eps, bias_correction=True, adamw_mode=False, weight_decay=0, amsgrad=False)
+            return DeepSpeedCPUAdam(optim_groups, lr=self.args.lr_init, betas=self.args.betas, eps=self.args.adam_eps, bias_correction=True)
         # return DeepSpeedCPUAdam(optim_groups, lr=self.args.lr_init, betas=self.args.betas, eps=self.args.adam_eps, bias_correction=True, adamw_mode=False, weight_decay=0, amsgrad=False)
         if self.args.strategy == 'single_device' and self.args.precision == 'bf16':
             return torch.optim.Adam(optim_groups,lr=self.args.lr_init,betas=self.args.betas, eps=self.args.adam_eps)
         else:
-            return FusedAdam(optim_groups, lr=self.args.lr_init, betas=self.args.betas, eps=self.args.adam_eps, bias_correction=True, adam_w_mode=False, weight_decay=0, amsgrad=False)
+            return FusedAdam(optim_groups, lr=self.args.lr_init, betas=self.args.betas, eps=self.args.adam_eps, bias_correction=True)
         # return ZeroOneAdam(optim_groups, lr=self.args.lr_init, betas=self.args.betas, eps=self.args.adam_eps, bias_correction=True, weight_decay=0, amsgrad=False, cuda_aware=False)
 
     @property
@@ -668,7 +669,8 @@ class RWKV(pl.LightningModule):
                 if args.lora:
                     x, new_block_state = torch_checkpoint(block, x, block_state,use_reentrant=False) #use_reentrant=False或者不checkpoint第一层都可以使得梯度正常反传，要不然只反传一层
                 else:
-                    x, new_block_state = deepspeed.checkpointing.checkpoint(block, x, block_state)
+                    # x, new_block_state = deepspeed.checkpointing.checkpoint(block, x, block_state)
+                    x, new_block_state = torch_checkpoint(block, x, block_state,use_reentrant=False) #use_reentrant=False或者不checkpoint第一层都可以使得梯度正常反传，要不然只反传一层
             else:
                 x, new_block_state = block(x, block_state)
             new_states[i] = new_block_state
@@ -716,6 +718,7 @@ class RWKV(pl.LightningModule):
         #然后T都是样本长度
         #我感觉类似ctx_len_cutoff以后还是用额外的输入来标记每个序列的重置点，而不是模型内部规定一个重置点。
         #所以这里就不改成Blealtan的思路了，不过稍后可以在他的基础上rebase。他的代码更简洁一些
+        i = 0
         for i in range(math.ceil(T / T_MAX)-1):
             # pdb.set_trace()
             # total_loss, states, token_amount = deepspeed.checkpointing.checkpoint(
