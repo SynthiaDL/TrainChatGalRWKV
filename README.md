@@ -12,7 +12,7 @@ license: Apache 2.0
 - 规避cuda kernel造成的显存瓶颈，支持24G显存显卡全量训练RWKV 7B模型、LoRA训练RWKV 7B模型。
 - 实验性的无限长上下文训练
 
-本项目主体代码与[RWKV-LM-LoRA](https://github.com/Blealtan/RWKV-LM-LoRA/)相同，可以参考其训练配置。
+本项目主体代码与[RWKV-LM-LoRA](https://github.com/Blealtan/RWKV-LM-LoRA/)相同，可以参考其训练配置。**提醒一下：训练LoRA模型需要先和主模型合并才能使用！（使用merge_lora.py或者merge_lora_plus.py合并）。**
 
 由于项目屎山堆积比较重，未来代码可能会整理重构。这里仅简单介绍一下长上下文的解决方案。
 RWKV模型训练过程中训练文本长度ctx_len会对显存占用有重要影响，除了会增大激活值占用的存储，也会增大wkv kernel运算过程中的临时存储开销，导致24G显存下7B模型常常无法训练4096及以上文本（即使已经开启了层间梯度检查点（Gradient Checkpointing） `--grad_cp 1`）。
@@ -42,7 +42,7 @@ RWKV模型训练过程中训练文本长度ctx_len会对显存占用有重要影
 
 - 预处理：需要将处理前的neox风格jsonl文件放进`datasource`文件夹，命令参考`preprocess_data.sh`。目前已经处理了一版（去除R18内容）放进了`data`文件夹
 - 微调：命令参考`train.sh`，训练需要在`RWKV-v4neo-LoRA`文件夹下进行
-- 推理：用ChatRWKV，或者text-generation-webui载入模型
+- 推理：用ChatRWKV，或者text-generation-webui载入模型。
 
 ## 胡乱记录一下
 
