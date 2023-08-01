@@ -148,9 +148,10 @@ class train_callback(pl.Callback):
         dataset.real_epoch = int(args.epoch_begin + trainer.current_epoch)
         dataset.world_size = trainer.world_size
         dataset.current_warmup_step = trainer.global_step * args.micro_bsz * (args.accumulate_grad_batches or 1)
-        for dataloader in trainer.val_dataloaders:
-            dataloader.dataset.datasets.global_rank = trainer.global_rank
-            dataloader.dataset.datasets.world_size = trainer.world_size
+        if trainer.val_dataloaders:
+            for dataloader in trainer.val_dataloaders:
+                dataloader.dataset.datasets.global_rank = trainer.global_rank
+                dataloader.dataset.datasets.world_size = trainer.world_size
         # print(f'########## world_size {dataset.world_size} global_rank {dataset.global_rank} real_epoch {dataset.real_epoch} ##########')
 
     def on_train_epoch_end(self, trainer, pl_module):

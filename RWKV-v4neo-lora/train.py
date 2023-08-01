@@ -459,7 +459,7 @@ if __name__ == "__main__":
     # must set shuffle=False, persistent_workers=False (because worker is in another thread)
     data_loader = DataLoader(train_data, shuffle=False, pin_memory=True, batch_size=args.micro_bsz, num_workers=1, persistent_workers=False, drop_last=True,collate_fn=padding_fn)
     if dev_data is not None:
-        dev_data_loader = DataLoader(train_data, shuffle=False, pin_memory=True, batch_size=args.micro_bsz, num_workers=1, persistent_workers=False, drop_last=True,collate_fn=padding_fn)
+        dev_data_loader = DataLoader(dev_data, shuffle=False, pin_memory=True, batch_size=args.micro_bsz, num_workers=1, persistent_workers=False, drop_last=True,collate_fn=padding_fn)
     else:
         dev_data_loader = None
     #debug
@@ -509,4 +509,7 @@ if __name__ == "__main__":
 
     trainer.training_dataset = train_data
     trainer.dev_dataset = dev_data
-    trainer.fit(model, data_loader,dev_data_loader)
+    if dev_data_loader is not None:
+        trainer.fit(model, data_loader,dev_data_loader)
+    else:
+        trainer.fit(model,data_loader)
