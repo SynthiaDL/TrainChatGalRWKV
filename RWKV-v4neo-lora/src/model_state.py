@@ -719,7 +719,8 @@ class RWKV(pl.LightningModule):
         #我感觉类似ctx_len_cutoff以后还是用额外的输入来标记每个序列的重置点，而不是模型内部规定一个重置点。
         #所以这里就不改成Blealtan的思路了，不过稍后可以在他的基础上rebase。他的代码更简洁一些
         i = 0
-        for i in range(math.ceil(T / T_MAX)-1):
+        # for i in range(math.ceil(T / T_MAX)-1):
+        while i < math.ceil(T / T_MAX)-1:
             # pdb.set_trace()
             # total_loss, states, token_amount = deepspeed.checkpointing.checkpoint(
             total_loss,new_shift_states, new_wkv_states,token_amount = torch_checkpoint(
@@ -733,6 +734,7 @@ class RWKV(pl.LightningModule):
                 # use_reentrant=False
             )
             states = BlockStateList(new_shift_states, new_wkv_states)
+            i+=1
             # if total_loss.isnan().all():
             #     import transformers
             #     tokenizer = transformers.PreTrainedTokenizerFast(tokenizer_file="20B_tokenizer.json")

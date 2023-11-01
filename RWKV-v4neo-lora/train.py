@@ -403,6 +403,7 @@ if __name__ == "__main__":
                 load_dict[k] = model.state_dict()[k]
     # If using LoRA, the LoRA keys might be missing in the original model
     model.load_state_dict(load_dict, strict=(not args.lora))
+    del load_dict
     if os.path.isfile(args.lora_load):
         model.load_state_dict(torch.load(args.lora_load, map_location="cpu"),
                               strict=False)
