@@ -16,7 +16,7 @@
 # limitations under the License.
 
 """Megatron tokenizers."""
-
+import json
 from abc import ABC
 from abc import abstractmethod
 
@@ -25,7 +25,7 @@ from .rwkv_tokenizer import RWKV_TOKENIZER, TRIE_TOKENIZER
 from transformers import GPT2Tokenizer, GPT2TokenizerFast
 import numpy as np
 import sentencepiece as spm
-from typing import List, Union
+from typing import List, Union, Dict
 from .gpt2_tokenization import GPT2Tokenizer
 
 
@@ -47,7 +47,11 @@ def build_tokenizer(args):
         tokenizer = HFTokenizer(args.vocab_file)
     elif args.tokenizer_type.lower() == "RWKVTokenizer".lower():
         assert args.vocab_file is not None
-        tokenizer = RWKVTokenizer(args.vocab_file)
+        if args.special_tokens_dict_path is None:
+            print("No special token dictionary.")
+            tokenizer = RWKVTokenizer(args.vocab_file)
+        else:
+            tokenizer = RWKVTokenizer(args.vocab_file,json.load(open(args.special_tokens_dict_path, encoding="UTF-8")))
     elif args.tokenizer_type.lower() == "HFGPT2Tokenizer".lower():
         if args.vocab_file is None:
             print(
@@ -261,14 +265,43 @@ class HFTokenizer(AbstractTokenizer):
     def eod(self):
         return self.eod_id
 
+class ChatgalTokenizer(TRIE_TOKENIZER):
+    def __init__(self, file_name: str, special_tokens_dict: Dict[bytes, int] = None):
+        super().__init__(file_name)
+        for token in special_tokens_dict:
+            if token not in self.token2idx or special_tokens_dict[token] not in self.idx2token:
+                raise ValueError(f"{token}:{special_tokens_dict[token]} does not exist in the vocabulary file!")
+        self.special_tokens_dict = special_tokens_dict
+
+    # modified from https://github.com/neromous/RWKV-Ouroboros/blob/main/utils/tokenizer.py
+    def encodeBytes(self, src: bytes):
+        if self.special_tokens_dict is not None:
+            res = []
+            cache = bytearray()
+            for x in src:
+                cache.append(x)
+                for mk in self.special_tokens_dict:
+                    if cache.endswith(mk):
+                        res += super().encodeBytes(cache.replace(mk, b""))
+                        res.append(self.special_tokens_dict[mk])
+                        cache = bytearray()
+                        break
+            res += super().encodeBytes(cache)
+            return res
+        else:
+            return super().encodeBytes(src)
+
+    def encode(self, src: str):
+        return self.encodeBytes(src.encode("UTF-8"))
+
 class RWKVTokenizer(AbstractTokenizer):
     """RWKV Worlds Tokenizer."""
 
-    def __init__(self, vocab_file='rwkv_vocab_v20230424.txt'):
+    def __init__(self, vocab_file='rwkv_vocab_v20230424.txt',special_tokens_dict=None):
         name = "RWKVTokenizer"
         super().__init__(name)
 
-        self.tokenizer = RWKV_TOKENIZER(vocab_file)
+        self.tokenizer = ChatgalTokenizer(vocab_file,special_tokens_dict)
         self.eod_id = 0  # self.tokenizer.token_to_id("<|endoftext|>")
         # self.pad_id = self.tokenizer.token_to_id("<|padding|>")
 

@@ -99,6 +99,9 @@ def get_args():
         help="What type of tokenizer to use.",
     )
     group.add_argument(
+        "--special_tokens_dict_path", type=str, default=None, help="Path to the special token file"
+    )
+    group.add_argument(
         "--vocab-file", type=str, default=None, help="Path to the vocab file"
     )
     group.add_argument(
