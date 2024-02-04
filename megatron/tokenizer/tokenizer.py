@@ -51,7 +51,9 @@ def build_tokenizer(args):
             print("No special token dictionary.")
             tokenizer = RWKVTokenizer(args.vocab_file)
         else:
-            tokenizer = RWKVTokenizer(args.vocab_file,json.load(open(args.special_tokens_dict_path, encoding="UTF-8")))
+            st_dict = json.load(open(args.special_tokens_dict_path, encoding="UTF-8"))
+            st_dict = {key.encode("UTF-8"):value for key,value in st_dict.items()}
+            tokenizer = RWKVTokenizer(args.vocab_file,st_dict)
     elif args.tokenizer_type.lower() == "HFGPT2Tokenizer".lower():
         if args.vocab_file is None:
             print(

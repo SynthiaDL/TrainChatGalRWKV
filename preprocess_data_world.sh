@@ -1,1 +1,1 @@
-python preprocess_data.py --input datasource/ChatGalDataset/train_dataset.jsonl --output-prefix ./data/chatgal --vocab rwkv_vocab_v20230424.txt --dataset-impl mmap --tokenizer-type RWKVTokenizer --append-eod
+python preprocess_data.py --input data/training_dataset_cn_v2.jsonl --special_tokens_dict_path st_dict.json --output-prefix ./data/chatgal --vocab rwkv_vocab_v20230424.txt --dataset-impl mmap --tokenizer-type RWKVTokenizer --append-eod

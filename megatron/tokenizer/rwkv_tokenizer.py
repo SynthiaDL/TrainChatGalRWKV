@@ -145,7 +145,7 @@ class TRIE:
 
 class TRIE_TOKENIZER():
     def __init__(self, file_name):
-        self.vocab_size = 65525
+        self.vocab_size = 65536
         self.idx2token = {}
         sorted = [] # must be already sorted
         with open(file_name, "r", encoding="utf-8") as f:
