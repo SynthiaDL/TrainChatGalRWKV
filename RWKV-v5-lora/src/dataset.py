@@ -13,48 +13,6 @@ from .utils import MaybeIsPrime
 
 class MyDataset(Dataset):
     def __init__(self, args):
-        if args.my_pile_stage > 0:
-            magic_prime_bak = args.magic_prime
-
-            if args.my_pile_shift < 0:
-                args.my_pile_shift = 0
-
-            if magic_prime_bak > 0:
-                args.magic_prime = magic_prime_bak
-            if args.my_qa_mask == 2:
-                args.epoch_count = 2 * args.magic_prime // 40320
-            else:
-                args.epoch_count = args.magic_prime // 40320
-
-            args.epoch_steps = 40320 // args.real_bsz
-            assert args.epoch_steps * args.real_bsz == 40320
-            # if args.my_pile_stage == 2:
-            #     assert args.lr_final == args.lr_init
-            if args.my_pile_stage >= 2:  # find latest saved model
-                list_p = []
-                for p in os.listdir(args.proj_dir):
-                    if p.startswith("rwkv") and p.endswith(".pth"):
-                        p = ((p.split("-"))[1].split("."))[0]
-                        if p != "final":
-                            if p == "init":
-                                p = -1
-                            else:
-                                p = int(p)
-                            list_p += [p]
-                list_p.sort()
-                max_p = list_p[-1]
-                if len(list_p) > 1:
-                    args.my_pile_prev_p = list_p[-2]  # in case max_p is corrupted
-                if max_p == -1:
-                    args.load_model = f"{args.proj_dir}/rwkv-init.pth"
-                else:
-                    args.load_model = f"{args.proj_dir}/rwkv-{max_p}.pth"
-                    if args.warmup_steps < 0:
-                        if args.my_pile_stage == 2:
-                            args.warmup_steps = 10
-                        else:
-                            args.warmup_steps = 30
-                args.epoch_begin = max_p + 1
         self.args = args
 
         if args.data_type == "binidx":
@@ -91,22 +49,12 @@ class MyDataset(Dataset):
                 self.samples_per_epoch = args.epoch_steps * args.real_bsz
                 assert self.samples_per_epoch == 40320
                 rank_zero_info(f"########## Pile 20b-tokenized stage {args.my_pile_stage} ##########")
+                rank_zero_info(f"Data size: {self.data_size}")
                 dataset_slot = self.data_size // args.ctx_len
-
                 if args.my_pile_stage != 4:
-                    def find_prime(n):
-                        for i in range(n, 0, -1):
-                            for j in range(2, int(math.sqrt(i)) + 1):
-                                if i % j == 0:
-                                    break
-                            else:
-                                if i % 3 == 2:
-                                    return i
-                    args.my_exit_tokens = self.data_size
-                    args.magic_prime = find_prime(int(self.data_size/args.ctx_len-1))
                     assert MaybeIsPrime(args.magic_prime)
                     assert args.magic_prime % 3 == 2
-                    assert 0.99 < args.magic_prime / dataset_slot <= 1
+                    assert args.magic_prime / dataset_slot > 0.99 and args.magic_prime / dataset_slot <= 1
         elif args.data_type == "numpy":
             self.data = np.load(args.data_file).astype("int")
             self.vocab_size = args.vocab_size

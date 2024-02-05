@@ -52,7 +52,7 @@ if __name__ == "__main__":
     parser.add_argument("--weight_decay_final", default=-1, type=float)
 
     parser.add_argument("--my_pile_version", default=1, type=int)  # my special pile version
-    parser.add_argument("--my_pile_stage", default=3, type=int)  # my special pile mode
+    parser.add_argument("--my_pile_stage", default=0, type=int)  # my special pile mode
     parser.add_argument("--my_pile_shift", default=-1, type=int)  # my special pile mode - text shift
     parser.add_argument("--my_pile_edecay", default=0, type=int)
     parser.add_argument("--layerwise_lr", default=1, type=int)  # layerwise lr for faster convergence (but slower it/s)
@@ -66,12 +66,12 @@ if __name__ == "__main__":
     parser.add_argument("--head_size_divisor", default=8, type=int)
     parser.add_argument("--my_pos_emb", default=0, type=int)
     parser.add_argument("--load_partial", default=0, type=int)
-    # parser.add_argument("--magic_prime", default=0, type=int)
+    parser.add_argument("--magic_prime", default=0, type=int)
     parser.add_argument("--my_qa_mask", default=0, type=int)
     parser.add_argument("--my_random_steps", default=0, type=int)
     parser.add_argument("--my_testing", default='', type=str)
     parser.add_argument("--my_exit", default=99999999, type=int)
-    # parser.add_argument("--my_exit_tokens", default=0, type=int)
+    parser.add_argument("--my_exit_tokens", default=0, type=int)
 
     #LORA
     parser.add_argument("--emb", action="store_true")
@@ -137,9 +137,49 @@ if __name__ == "__main__":
         args.run_name = f"{args.vocab_size} ctx{args.ctx_len} L{args.n_layer} D{args.n_embd}"
     if not os.path.exists(args.proj_dir):
         os.makedirs(args.proj_dir)
-    from src.dataset import MyDataset
 
-    train_data = MyDataset(args)
+    if args.my_pile_stage > 0:
+        magic_prime_bak = args.magic_prime
+
+        if args.my_pile_shift < 0:
+            args.my_pile_shift = 0
+
+        if magic_prime_bak > 0:
+            args.magic_prime = magic_prime_bak
+        if args.my_qa_mask == 2:
+            args.epoch_count = 2 * args.magic_prime // 40320
+        else:
+            args.epoch_count = args.magic_prime // 40320
+
+        args.epoch_steps = 40320 // args.real_bsz
+        assert args.epoch_steps * args.real_bsz == 40320
+        # if args.my_pile_stage == 2:
+        #     assert args.lr_final == args.lr_init
+        if args.my_pile_stage >= 2:  # find latest saved model
+            list_p = []
+            for p in os.listdir(args.proj_dir):
+                if p.startswith("rwkv") and p.endswith(".pth"):
+                    p = ((p.split("-"))[1].split("."))[0]
+                    if p != "final":
+                        if p == "init":
+                            p = -1
+                        else:
+                            p = int(p)
+                        list_p += [p]
+            list_p.sort()
+            max_p = list_p[-1]
+            if len(list_p) > 1:
+                args.my_pile_prev_p = list_p[-2]  # in case max_p is corrupted
+            if max_p == -1:
+                args.load_model = f"{args.proj_dir}/rwkv-init.pth"
+            else:
+                args.load_model = f"{args.proj_dir}/rwkv-{max_p}.pth"
+                if args.warmup_steps < 0:
+                    if args.my_pile_stage == 2:
+                        args.warmup_steps = 10
+                    else:
+                        args.warmup_steps = 30
+            args.epoch_begin = max_p + 1
 
     samples_per_epoch = args.epoch_steps * args.real_bsz
     tokens_per_epoch = samples_per_epoch * args.ctx_len
@@ -209,7 +249,9 @@ if __name__ == "__main__":
     ########################################################################################################
 
     from src.trainer import train_callback, generate_init_weight
+    from src.dataset import MyDataset
 
+    train_data = MyDataset(args)
     args.vocab_size = train_data.vocab_size
 
     from src.model import RWKV, LORA_CONFIG, LoraLinear
