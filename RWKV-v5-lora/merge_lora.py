@@ -20,6 +20,8 @@ with torch.no_grad():
     w: Dict[str, torch.Tensor] = torch.load(base_model, map_location='cpu')
     # merge LoRA-only slim checkpoint into the main weights
     w_lora: Dict[str, torch.Tensor] = torch.load(lora, map_location='cpu')
+    if "special_token_emb.weight" in w_lora:
+        del w_lora["special_token_emb.weight"]
     for k in w_lora.keys():
         w[k] = w_lora[k]
     output_w: typing.OrderedDict[str, torch.Tensor] = OrderedDict()

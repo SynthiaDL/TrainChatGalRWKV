@@ -140,6 +140,7 @@ cython_debug/
 #resources
 datasource/
 pretrained_models/
+RWKV-v5-lora/models/
 RWKV-v4neo/out*/
 RWKV-v4neo/wandb/
 RWKV-v4neo-lora/out*/

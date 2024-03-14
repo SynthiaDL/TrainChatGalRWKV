@@ -393,7 +393,8 @@ class RWKV(pl.LightningModule):
         assert args.dim_ffn % 32 == 0
 
         self.emb = nn.Embedding(args.vocab_size, args.n_embd)
-
+        if args.special_vocab_size:
+            self.special_token_emb = nn.Embedding(args.special_vocab_size+1, args.n_embd,padding_idx=0)
         self.blocks = nn.ModuleList([Block(args, i) for i in range(args.n_layer)])
 
         self.ln_out = nn.LayerNorm(args.n_embd)
@@ -485,8 +486,9 @@ class RWKV(pl.LightningModule):
         args = self.args
         B, T = idx.size()
         assert T <= args.ctx_len, "Cannot forward, model ctx_len is exhausted."
-
         x = self.emb(idx)
+        if args.special_vocab_size:
+            x += self.special_token_emb(torch.clamp(idx-(args.vocab_size-args.special_vocab_size-1),min=0))
         x_emb = x
 
         if args.dropout > 0:

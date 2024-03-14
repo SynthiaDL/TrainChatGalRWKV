@@ -81,6 +81,7 @@ if __name__ == "__main__":
     parser.add_argument("--lora_alpha", default=32, type=float)
     parser.add_argument("--lora_dropout", default=0.01, type=float)
     parser.add_argument("--lora_parts", default="att,ln,time", type=str)
+    parser.add_argument("--special_vocab_size", default=0, type=int)
 
     if pl.__version__[0]=='2':
         parser.add_argument("--accelerator", default="gpu", type=str)
@@ -267,6 +268,11 @@ if __name__ == "__main__":
     # only train lora parameters
     if args.lora:
         model.requires_grad_(False)
+        if args.emb:
+            model.emb.requires_grad_(True)
+        if args.special_vocab_size>0:
+            model.special_token_emb.requires_grad_(True)
+            print(f"  Training special token embedding size: {args.special_vocab_size}")
         for name, module in model.named_modules():
            
             if any(n.startswith("lora_") for n, _ in module.named_parameters()):
