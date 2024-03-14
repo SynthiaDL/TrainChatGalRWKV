@@ -49,7 +49,6 @@ class MyDataset(Dataset):
                 self.samples_per_epoch = args.epoch_steps * args.real_bsz
                 assert self.samples_per_epoch == 40320
                 rank_zero_info(f"########## Pile 20b-tokenized stage {args.my_pile_stage} ##########")
-                rank_zero_info(f"Data size: {self.data_size}")
                 dataset_slot = self.data_size // args.ctx_len
                 if args.my_pile_stage != 4:
                     assert MaybeIsPrime(args.magic_prime)
@@ -150,7 +149,8 @@ class MyDataset(Dataset):
 
             if args.data_type == "binidx":
                 if args.my_pile_version == 1:
-                    dix = data.get(idx=0, offset=i, length=req_len).astype(int)
+                    #dix = data.get(idx=0, offset=i, length=req_len).astype(int)
+                    dix = data.pad(idx=idx, length=req_len).astype(int)
                 else:
                     # self.data : cutoff, chunk_count, data
                     for j in range(len(data)):
